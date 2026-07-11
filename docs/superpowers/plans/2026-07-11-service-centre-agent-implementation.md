@@ -3561,10 +3561,19 @@ def test_end_to_end_one_revision_round_when_synthesis_flags_insufficient(tmp_pat
         FakeToolUseBlock(name="get_tickets", input={}, id="tu_1"),
     ])
     insufficient_json = json.dumps({
+        "answer": {
+            "recommendation": "Prioritise TCK-002 pending equipment history confirmation.",
+            "evidence": [
+                {"source": "ticket-service", "record_id": "TCK-002", "detail": "critical, open"},
+            ],
+            "assumptions": ["equipment history not yet reviewed"],
+            "confidence": "medium",
+            "next_action": "Confirm against ETCH-07 history before dispatch.",
+        },
         "sufficient": False,
         "additional_tool_request": {
             "tool_name": "get_equipment_history",
-            "tool_input": {"tool_id": "ETCH-07"},
+            "input": {"tool_id": "ETCH-07"},
         },
     })
     insufficient_response = FakeResponse(content=[FakeTextBlock(text=insufficient_json)])
