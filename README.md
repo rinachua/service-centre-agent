@@ -11,8 +11,9 @@ design spec.
 ## Prerequisites
 
 - Docker and Docker Compose
-- An Anthropic API key with access to `claude-sonnet-5` (or set `CLAUDE_MODEL` to a
-  model your key has access to)
+- An Anthropic API key with access to `claude-sonnet-5` and `claude-haiku-4-5-20251001`
+  (or set `CLAUDE_MODEL`/`CLAUDE_PLANNER_MODEL` to models your key has access to — see
+  "Model tiering and cost bound" below for why two models are used)
 
 ## Setup
 
@@ -44,6 +45,22 @@ Retrieve the full tool-call trace behind any answer:
 ```bash
 curl -s http://localhost:8000/audit/<request_id>
 ```
+
+## Model tiering and cost bound
+
+`agent-orchestrator` uses two Claude models, not one:
+
+- `CLAUDE_PLANNER_MODEL` (default `claude-haiku-4-5-20251001`) — a single, cheap
+  planning call per request that decides which tool(s) to call.
+- `CLAUDE_MODEL` (default `claude-sonnet-5`) — the synthesis call that turns tool
+  results into the structured answer.
+
+Every request makes at most 3 Claude calls total: 1 plan + 1 synthesis, plus exactly
+1 more capped "revision" synthesis call, only if the first synthesis judges its own
+evidence insufficient. There is no open-ended tool-use loop and no repair round-trip —
+see `docs/architecture.md` and the design spec's §3.1/§9.1 for why this bounded
+"plan→execute→synthesise" shape was chosen over a live tool-use loop for a
+cost-sensitive, auditable deployment context.
 
 ## Run a single service outside Docker (for development)
 
