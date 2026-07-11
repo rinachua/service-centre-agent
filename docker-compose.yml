@@ -1,0 +1,85 @@
+services:
+  ticket-service:
+    build: ./services/ticket-service
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data:ro
+      - ticket-data:/app/data-local
+    environment:
+      - DB_PATH=/app/data-local/tickets.db
+      - SEED_PATH=/app/data/seed
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  equipment-history-service:
+    build: ./services/equipment-history-service
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./data:/app/data:ro
+      - equipment-data:/app/data-local
+    environment:
+      - DB_PATH=/app/data-local/equipment.db
+      - SEED_PATH=/app/data/seed
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  knowledge-service:
+    build: ./services/knowledge-service
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./data:/app/data:ro
+    environment:
+      - SEED_PATH=/app/data/seed
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  recommendation-service:
+    build: ./services/recommendation-service
+    ports:
+      - "8004:8004"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  agent-orchestrator:
+    build: ./services/agent-orchestrator
+    ports:
+      - "8000:8000"
+    volumes:
+      - orchestrator-data:/app/data-local
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-5}
+      - TICKET_SERVICE_URL=http://ticket-service:8001
+      - EQUIPMENT_SERVICE_URL=http://equipment-history-service:8002
+      - KNOWLEDGE_SERVICE_URL=http://knowledge-service:8003
+      - RECOMMENDATION_SERVICE_URL=http://recommendation-service:8004
+      - AUDIT_DB_PATH=/app/data-local/audit.db
+    depends_on:
+      ticket-service:
+        condition: service_healthy
+      equipment-history-service:
+        condition: service_healthy
+      knowledge-service:
+        condition: service_healthy
+      recommendation-service:
+        condition: service_healthy
+
+volumes:
+  ticket-data:
+  equipment-data:
+  orchestrator-data:
