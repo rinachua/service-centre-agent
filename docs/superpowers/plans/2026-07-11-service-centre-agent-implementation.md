@@ -3638,14 +3638,24 @@ git commit -m "test(agent-orchestrator): rework integration test for bounded pla
 
 ---
 
-## Task 14: README and architecture documentation
+## Task 14 (REVISED): README and architecture documentation
+
+> Supersedes the original version of this task, which was fully implemented and
+> committed (commit `04e713b`) BEFORE the bounded-hybrid pivot — that content
+> describes the old live Claude tool-use loop throughout (diagram label, Agent
+> workflow steps 1-2, trade-offs section) and is now stale. This REPLACES
+> `README.md` and `docs/architecture.md`'s content entirely with versions that
+> describe the bounded plan→execute→synthesise flow, the model-tiering choice
+> (Haiku planner / Sonnet synthesis), and folds in the gov-agency cost/trade-off
+> analysis (spec §9.1) and the async-submission rejection rationale (spec §9.2)
+> that were added to the spec after `04e713b` was written.
 
 **Files:**
-- Modify: `README.md` (replace Task 1's stub)
-- Create: `docs/architecture.md`
+- Modify: `README.md` (replace previous content)
+- Modify: `docs/architecture.md` (replace previous content)
 
 **Interfaces:**
-- Consumes: the completed system from Tasks 1-13.
+- Consumes: the completed system from Tasks 1-13, including Tasks 9/10/12/13 REVISED.
 - Produces: the deliverables required by the assessment brief's §6.B and §6.D — nothing later depends on this task.
 
 - [ ] **Step 1: Replace `README.md`**
@@ -3664,8 +3674,9 @@ design spec.
 ## Prerequisites
 
 - Docker and Docker Compose
-- An Anthropic API key with access to `claude-sonnet-5` (or set `CLAUDE_MODEL` to a
-  model your key has access to)
+- An Anthropic API key with access to `claude-sonnet-5` and `claude-haiku-4-5-20251001`
+  (or set `CLAUDE_MODEL`/`CLAUDE_PLANNER_MODEL` to models your key has access to — see
+  "Model tiering" below for why two models are used)
 
 ## Setup
 
@@ -3697,6 +3708,22 @@ Retrieve the full tool-call trace behind any answer:
 ```bash
 curl -s http://localhost:8000/audit/<request_id>
 ```
+
+## Model tiering and cost bound
+
+`agent-orchestrator` uses two Claude models, not one:
+
+- `CLAUDE_PLANNER_MODEL` (default `claude-haiku-4-5-20251001`) — a single, cheap
+  planning call per request that decides which tool(s) to call.
+- `CLAUDE_MODEL` (default `claude-sonnet-5`) — the synthesis call that turns tool
+  results into the structured answer.
+
+Every request makes at most 3 Claude calls total: 1 plan + 1 synthesis, plus exactly
+1 more capped "revision" synthesis call only if the first synthesis judges its own
+evidence insufficient. There is no open-ended tool-use loop and no repair round-trip —
+see `docs/architecture.md` and the design spec's §3.1/§9.1 for why this bounded
+"plan→execute→synthesise" shape was chosen over a live tool-use loop for a
+cost-sensitive, auditable deployment context.
 
 ## Run a single service outside Docker (for development)
 
@@ -3769,7 +3796,8 @@ the full alternatives analysis.
                             POST /chat
                                  v
                         agent-orchestrator (:8000)
-                        FastAPI + Claude tool-use loop
+                        FastAPI + bounded
+                        plan→execute→synth
                         audit_log (SQLite)
               REST      /       |        \      REST
      +------------------+       |         +------------------+
@@ -3801,37 +3829,68 @@ for the authoritative list of routes, request/response shapes, and status codes.
 Every downstream call from the orchestrator carries `X-Request-ID` so log lines
 across services can be correlated for one user query.
 
-## Agent workflow
+## Agent workflow: bounded plan→execute→synthesise
 
-1. **Planning & tool use**: Claude receives the user query and the 7-tool schema
-   (`get_tickets`, `get_ticket`, `get_equipment`, `get_equipment_history`,
-   `search_history`, `search_knowledge`, `score_priority`), and decides which to call,
-   iterating for up to 6 rounds.
-2. **Response synthesis**: the final turn must be a JSON object matching the
-   `AgentAnswer` schema (recommendation, evidence, assumptions, confidence,
-   next_action, optional followup_note). A malformed response gets one repair
-   prompt before the orchestrator falls back to a templated answer built from raw
-   tool results.
-3. **Evidence grounding**: every `record_id` cited in the final answer is checked
-   against IDs actually seen in tool results that session; unverifiable IDs are
-   flagged rather than trusted.
-4. **Failure handling**: downstream calls get a 3s timeout and 1 retry; on repeated
-   failure the orchestrator continues with partial evidence and records the gap in
-   `assumptions`, never surfacing a bare 500 to the user.
-5. **Human-in-the-loop writes**: the agent only ever drafts a follow-up note. Saving
-   it to `ticket-service` is a separate, explicit UI action.
+The orchestrator does NOT run an open-ended Claude tool-use loop. It runs a bounded,
+at-most-3-Claude-call flow, chosen over a live tool-use loop specifically for cost
+predictability and auditability in a cost-sensitive/regulated deployment context (see
+spec §3.1 and §9.1 for the full comparison and the gov-agency framing that drove it):
+
+1. **Plan** (1 call, `CLAUDE_PLANNER_MODEL`, default `claude-haiku-4-5-20251001`):
+   Claude receives the user query and the 7-tool schema (`get_tickets`, `get_ticket`,
+   `get_equipment`, `get_equipment_history`, `search_history`, `search_knowledge`,
+   `score_priority`) with `tool_choice={"type": "any"}`, forcing it to name every tool
+   it wants called in this single turn — no free text, no iteration, no seeing results
+   before deciding.
+2. **Execute** (deterministic, no LLM): the orchestrator calls each planned tool
+   against the relevant downstream REST service and collects results.
+3. **Synthesise** (1 call, `CLAUDE_MODEL`, default `claude-sonnet-5`): Claude receives
+   the user query and all tool results, and must return a JSON object with an `answer`
+   (matching the `AgentAnswer` schema: recommendation, evidence, assumptions,
+   confidence, next_action, optional followup_note), a `sufficient` boolean, and an
+   optional `additional_tool_request`. If the JSON is malformed, the orchestrator falls
+   back directly to a templated answer built from raw tool results — there is no
+   repair-prompt round-trip, to keep the cost cap strict.
+4. **Optional single revision** (at most 1 more call): only if `sufficient` is false
+   and an `additional_tool_request` was given, the orchestrator executes that one extra
+   tool call and makes exactly one final revision-synthesis call. The revision
+   response has no `sufficient`/`additional_tool_request` fields, so a second revision
+   is structurally impossible — 3 Claude calls is the hard ceiling per request, never
+   more. `AgentTrace.revised` records whether this path fired, for auditability.
+
+Cross-cutting to every step:
+- **Evidence grounding**: every `record_id` cited in the final answer is checked
+  against IDs actually seen in tool results that session; unverifiable IDs are
+  flagged rather than trusted.
+- **Failure handling**: downstream calls get a 3s timeout and 1 retry; on repeated
+  failure the orchestrator continues with partial evidence and records the gap in
+  `assumptions`, never surfacing a bare 500 to the user.
+- **Prompt-injection scanning**: every planned tool call's input is scanned before
+  execution, in both the initial plan and the one optional revision round.
+- **Human-in-the-loop writes**: the agent only ever drafts a follow-up note. Saving
+  it to `ticket-service` is a separate, explicit UI action.
 
 ## Key trade-offs
 
-See spec §3.1 for the full pros/cons table comparing the live tool-use loop against
-plan-then-execute and event-driven alternatives, and the deterministic-vs-LLM boundary
-rationale for `recommendation-service`.
+See spec §3.1 for the full pros/cons table comparing this bounded hybrid against a
+live Claude tool-use loop, a plain plan-then-execute flow with no revision, and
+event-driven (queue-based) inter-service calls; §9.1 for the LLM cost/latency figures
+and the gov-agency cost/auditability/model-tiering/deployment-topology considerations
+that motivated the pivot away from the live tool-use loop; §9.2 for why async request
+submission (job-queue decoupling of the `/chat` endpoint itself) was considered
+separately and rejected for this demo; and the deterministic-vs-LLM boundary rationale
+for `recommendation-service`.
 
 ## Future production considerations
 
-See spec §9 (LLM cost/latency at scale, vector-store retrieval, recurrence-detection
-model, audit storage, circuit breakers) and this document's "What I'd improve with
-more time" section in `README.md`.
+See spec §9 (LLM cost/latency at scale — including the cost table and model-tiering
+rationale in §9.1, and the async-submission rejection in §9.2 — vector-store
+retrieval, recurrence-detection model, audit storage, circuit breakers, query routing
+to skip the LLM entirely for deterministic queries, and Bedrock GovCloud/on-prem
+deployment topology for data residency) and this document's "What I'd improve with
+more time" section in `README.md`. Of these, the bounded hybrid flow and model
+tiering (Haiku planner / Sonnet synthesis) were actually adopted into this demo;
+query routing and deployment topology remain documented future work, not built here.
 ```
 
 - [ ] **Step 3: Verify the deliverables checklist against the assessment brief**
