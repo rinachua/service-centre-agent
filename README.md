@@ -92,10 +92,13 @@ done
 
 ## Known limitations and assumptions
 
-- No authentication/authorization is implemented; see `docs/architecture.md` §8 for
-  the documented production assumption.
+- No authentication/authorization is implemented; see the design spec's §8 "Security
+  / access-control assumption"
+  (`docs/superpowers/specs/2026-07-11-service-centre-agent-design.md`) for the
+  documented production assumption.
 - Knowledge retrieval is TF-IDF over 3 documents — adequate for this demo, not for a
-  production-scale document corpus (see `docs/architecture.md` §9).
+  production-scale document corpus (see the design spec's §9 "Trade-offs & future
+  production considerations").
 - The agent can only draft follow-up notes; persisting one requires an explicit
   "Save follow-up" click in the UI (or a direct call to
   `POST /tickets/{ticket_id}/followups`) — this is a deliberate human-in-the-loop

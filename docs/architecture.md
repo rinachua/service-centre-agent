@@ -79,7 +79,9 @@ spec §3.1 and §9.1 for the full comparison and the gov-agency framing that dro
    tool call and makes exactly one final revision-synthesis call. The revision
    response has no `sufficient`/`additional_tool_request` fields, so a second revision
    is structurally impossible — 3 Claude calls is the hard ceiling per request, never
-   more. `AgentTrace.revised` records whether this path fired, for auditability.
+   more. `AgentTrace.revised` records in-process whether this path fired (useful for
+   debugging and as a hook for future audit-log extension), though it is not
+   currently persisted to the `audit_log` table by the `/chat` handler.
 
 Cross-cutting to every step:
 - **Evidence grounding**: every `record_id` cited in the final answer is checked
