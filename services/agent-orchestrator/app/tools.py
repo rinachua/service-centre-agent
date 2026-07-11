@@ -99,6 +99,14 @@ class ToolExecutor:
         self.recommendation_url = recommendation_url
         self.headers = {"X-Request-ID": request_id}
         self.timeout = timeout
+        # Every raw JSON payload fetched from a downstream service during the
+        # most recent execute() call, in fetch order. A compound tool (e.g.
+        # score_priority) may hit several services internally and return only
+        # a synthesised result to the caller/LLM; the grounding check still
+        # needs to see every real record fetched along the way, so callers of
+        # execute() (see app/loop.py) read this instead of just the return
+        # value when building the known-ID set for evidence verification.
+        self.raw_results: list = []
 
     def _get(self, base_url: str, path: str, params: dict | None = None):
         last_error: Exception | None = None
@@ -107,7 +115,9 @@ class ToolExecutor:
                 with httpx.Client(timeout=self.timeout, trust_env=False) as client:
                     resp = client.get(f"{base_url}{path}", params=params, headers=self.headers)
                     resp.raise_for_status()
-                    return resp.json()
+                    data = resp.json()
+                    self.raw_results.append(data)
+                    return data
             except httpx.HTTPStatusError as exc:
                 raise ServiceError(base_url, f"HTTP {exc.response.status_code}") from exc
             except httpx.HTTPError as exc:
@@ -121,7 +131,9 @@ class ToolExecutor:
                 with httpx.Client(timeout=self.timeout, trust_env=False) as client:
                     resp = client.post(f"{base_url}{path}", json=json_body, headers=self.headers)
                     resp.raise_for_status()
-                    return resp.json()
+                    data = resp.json()
+                    self.raw_results.append(data)
+                    return data
             except httpx.HTTPStatusError as exc:
                 raise ServiceError(base_url, f"HTTP {exc.response.status_code}") from exc
             except httpx.HTTPError as exc:
@@ -129,6 +141,7 @@ class ToolExecutor:
         raise ServiceError(base_url, f"unreachable after retry: {last_error}")
 
     def execute(self, tool_name: str, tool_input: dict):
+        self.raw_results = []
         if tool_name == "get_tickets":
             params = {k: v for k, v in tool_input.items() if v is not None}
             return self._get(self.ticket_url, "/tickets", params)

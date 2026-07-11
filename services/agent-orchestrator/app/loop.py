@@ -141,7 +141,16 @@ def run_agent_loop(client, model: str, user_query: str, tool_executor):
             trace.injection_flags.extend(_check_injection(block.input))
             try:
                 result = tool_executor.execute(block.name, block.input)
-                trace.raw_tool_results.append(result)
+                # Prefer every raw downstream payload the tool touched (if the
+                # executor exposes it) over just the final returned value, so
+                # grounding can verify evidence citing records that a compound
+                # tool (e.g. score_priority) fetched internally but didn't
+                # echo back in its own return value.
+                raw_fetches = getattr(tool_executor, "raw_results", None)
+                if raw_fetches:
+                    trace.raw_tool_results.extend(raw_fetches)
+                else:
+                    trace.raw_tool_results.append(result)
                 trace.tool_calls.append({
                     "tool_name": block.name, "input": block.input,
                     "result": result, "error": None,
