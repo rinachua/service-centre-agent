@@ -64,6 +64,7 @@ services:
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-5}
+      - CLAUDE_PLANNER_MODEL=${CLAUDE_PLANNER_MODEL:-claude-haiku-4-5-20251001}
       - TICKET_SERVICE_URL=http://ticket-service:8001
       - EQUIPMENT_SERVICE_URL=http://equipment-history-service:8002
       - KNOWLEDGE_SERVICE_URL=http://knowledge-service:8003
