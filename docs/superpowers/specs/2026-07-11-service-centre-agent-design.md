@@ -42,8 +42,8 @@ Four example queries define the acceptance bar:
                                       ▼
                          ┌─────────────────────────┐
                          │   agent-orchestrator     │◄──── audit_log (SQLite)
-                         │   (FastAPI + Claude      │
-                         │    tool-use loop)        │
+                         │   (FastAPI + bounded     │
+                         │   plan→execute→synth)    │
                          └───┬───────┬───────┬──────┘
                  REST        │       │       │        REST
         ┌────────────────────┘       │       └────────────────────┐
@@ -70,8 +70,9 @@ to — other services are never called directly by the client, and never call ea
 
 | Approach | Description | Pros | Cons | Decision |
 |---|---|---|---|---|
-| **Live Claude tool-use loop** (chosen) | Claude sees each tool result and decides the next call itself, over REST calls to each service. | Matches the brief's suggested "FastAPI + tool-calling" pattern; most genuinely agentic option — plan can change mid-investigation (e.g. escalate to knowledge-service only if history looks inconclusive); naturally supports "show me the evidence" since every tool call is already logged. | More LLM round-trips per query (3-6 calls) → higher cost and latency than a single-shot approach. | **Chosen.** |
-| **Plan-then-execute** | One Claude call produces a JSON plan, a deterministic router executes it, a second Claude call synthesises the answer. | Cheaper — fewer LLM round-trips; the deterministic routing step is easy to unit test. | Can't adapt mid-investigation once the plan is set; weaker demonstration of agentic reasoning for this assessment. | Rejected for the demo; noted as a cost-optimisation path for production (§9). |
+| **Bounded hybrid: plan → execute → synthesise, with one capped revision** (chosen) | One Claude call (cheap model) turns the query into a tool-call plan; a deterministic router executes it; one Claude call (full model) synthesises the answer and flags whether evidence was sufficient. If not, exactly one more execute→synthesise round runs — never more. | Fixed worst-case cost ceiling (2 calls typical, 3 max, vs. an open-ended 3-6) and therefore predictable at procurement/budget-planning time; the "plan" is a discrete, loggable artifact — stronger auditability story than an autonomous loop deciding its own next step; still recovers from a wrong first plan once, unlike plain plan-then-execute; cheap model on the planning call, full model only where reasoning quality matters (model tiering). | Less adaptive than a fully open loop in the rare case where more than one revision would genuinely help; the plan/synthesis split adds a small amount of orchestration complexity (a JSON contract between the two phases) that a single continuous loop doesn't need. | **Chosen.** Revised from an initial live tool-use loop after weighing cost predictability and auditability for a cost-sensitive/regulated deployment context — see §9.1. |
+| **Live Claude tool-use loop** | Claude sees each tool result and decides the next call itself, over REST calls to each service, for up to 6 rounds. | Most genuinely agentic option — the plan can change mid-investigation on every single tool result, not just once; naturally supports "show me the evidence" since every tool call is already logged. | More LLM round-trips per query (3-6 calls, variable and hard to predict) → higher and less predictable cost/latency. At Claude Sonnet 5 pricing (introductory, through Aug 2026): roughly **$0.017 for a simple query, $0.027 typical, up to ~$0.05 for a heavy multi-tool investigation** — see §9.1. An autonomous loop is also a weaker audit story than a discrete, reviewable plan. | Considered first, superseded by the bounded hybrid above once cost predictability and auditability were weighted alongside "most agentic" — see §9.1. |
+| **Plain plan-then-execute (no revision)** | One Claude call produces a JSON plan, a deterministic router executes it, a second Claude call synthesises the answer — always exactly 2 calls, no recovery path. | Cheapest and most predictable of all three — fixed 2 calls, always. | Can't adapt at all if the first plan turns out wrong; the bounded hybrid gets almost all of this pattern's cost benefit while keeping a capped recovery path, so this variant's extra restriction wasn't worth it. | Rejected — the bounded hybrid dominates it. |
 | **Event-driven (queue) inter-service calls** | Orchestrator publishes tool-call requests to a broker (e.g. Redis/RabbitMQ); services subscribe and respond async. | Matches one of the brief's allowed interface styles; demonstrates async/event-driven patterns. | Adds broker infrastructure and response-correlation complexity disproportionate to a lightweight demo; brief explicitly says REST is acceptable. | Rejected. |
 
 **Deterministic vs. LLM boundary.** `recommendation-service` does priority *scoring*
@@ -144,11 +145,12 @@ match, not ML).
 The only service exposed to the user. Responsibilities:
 
 - Serves the static chat UI (`GET /`).
-- `POST /chat` — conversational endpoint, runs the tool-use loop, returns the structured
-  answer (§6).
+- `POST /chat` — conversational endpoint, runs the bounded plan→execute→synthesise flow
+  (§6.1), returns the structured answer (§6.2).
 - `GET /audit/{request_id}` — replay the full tool-call trace for a prior request.
-- Holds the Claude client, tool schema (mapped 1:1 to the REST endpoints above), system
-  prompt, grounding checks, retry/fallback logic, and the `audit_log` SQLite table.
+- Holds the Claude client (planner model + synthesis model), tool schema (mapped 1:1 to
+  the REST endpoints above), system prompts, grounding checks, retry/fallback logic, and
+  the `audit_log` SQLite table.
 
 ## 5. Data model / synthetic dataset
 
@@ -167,15 +169,34 @@ Fab-flavored synthetic data, seeded via `scripts/seed_data.py` per service on st
 
 ## 6. Agent workflow
 
-### 6.1 Planning & tool use
+### 6.1 Planning & tool use (bounded hybrid: plan → execute → synthesise, ≤1 revision)
 
-System prompt establishes role, grounding rules ("only state facts backed by tool
-results; cite record IDs for every claim; if evidence is missing or conflicting, say so
-rather than guessing"), and the tool list. Claude receives the user query, decides which
-tool(s) to call, receives results, and iterates — up to 6 tool-call rounds — before
-producing a final answer. This lets it, for example, pull open tickets, then pull
-history only for the highest-severity tool, then search knowledge only if history alone
-doesn't explain the pattern.
+Three phases, at most 3 Claude calls total (2 in the common case):
+
+1. **Plan** (cheap model, e.g. Haiku). System prompt + the same 7-tool schema (§4.5) +
+   the user query, called with `tool_choice: "any"` so the response is only tool_use
+   blocks — no free text, no execution yet. Claude may request multiple tool calls in
+   this single response (e.g. `get_tickets` and `get_equipment` together); the
+   orchestrator treats the full set of returned tool_use blocks as "the plan."
+2. **Execute** (deterministic, no LLM). The orchestrator's router runs exactly the
+   planned tool calls against the 4 backend services via the same `ToolExecutor`
+   (§4.5) used previously, with the same per-call timeout/retry/error-containment
+   behaviour (§6.5) — a `ServiceError` here never crashes the request.
+3. **Synthesise** (full model, e.g. Sonnet). User query + all tool results are sent to
+   Claude, which returns a JSON object containing a best-effort `answer` (§6.2's
+   schema), plus `sufficient: bool` and, if `false`, one `additional_tool_request`
+   naming exactly one more tool call it needs.
+4. **Optional single revision.** If `sufficient` was `false` and no revision has run
+   yet for this request, the orchestrator executes that one additional tool call
+   (step 2 again, deterministic) and calls Claude once more to synthesise (step 3
+   again) — but this final round has no `sufficient`/`additional_tool_request` fields
+   in its expected output, so no further revision can be requested. Worst case: plan
+   (1) + synthesise (1) + revise-synthesise (1) = 3 Claude calls, never more.
+
+This recovers most of a fully open loop's value (a wrong first plan can still be
+corrected once, e.g. escalate to knowledge-service if history alone didn't explain the
+pattern) while keeping a hard, predictable cost ceiling — the deciding factor for the
+cost-sensitive/regulated deployment context this was revised for (§9.1).
 
 ### 6.2 Response synthesis
 
@@ -189,10 +210,19 @@ confidence: "low" | "medium" | "high"
 next_action: str
 ```
 
-If Claude's output doesn't validate, the orchestrator sends one repair prompt quoting
-the validation error. If that also fails, it falls back to a templated answer built
-directly from the raw tool results already collected in that session (never a bare
-error to the user).
+The synthesis call's raw output additionally carries `sufficient: bool` and an optional
+`additional_tool_request` (consumed by the orchestrator to decide whether to run the
+one allowed revision round; never exposed to the client — the `/chat` response only
+ever contains the `answer` shape above, plus `followup_note` per §6.4).
+
+If Claude's output doesn't validate against the expected schema at either synthesis
+step, the orchestrator falls back immediately to a templated answer built directly
+from the raw tool results already collected — there is deliberately no repair
+round-trip in this design (unlike an earlier version of this spec), because a repair
+call would reintroduce the unbounded-cost problem the bounded hybrid exists to remove.
+Claude's structured-output reliability is high enough that this is an acceptable
+trade: a malformed response is rare, and the fallback path already guarantees the user
+never sees a bare error.
 
 ### 6.3 Evidence grounding (hallucination control)
 
@@ -221,10 +251,10 @@ procedural.
 ### 6.5 Failure handling
 
 - Each downstream REST call: 3s timeout, 1 retry with backoff.
-- On repeated failure, the orchestrator injects a synthetic tool result noting the
-  service was unavailable and continues the loop; the final answer's `assumptions`
-  field records the gap explicitly (e.g. "equipment-history-service was unreachable;
-  recommendation is based on ticket data only").
+- On repeated failure, the orchestrator records a synthetic "unavailable" result for
+  that tool call and proceeds to the synthesis step anyway; the final answer's
+  `assumptions` field records the gap explicitly (e.g. "equipment-history-service was
+  unreachable; recommendation is based on ticket data only").
 - The orchestrator never lets a downstream failure become an unhandled 500 to the user.
 
 ## 7. Observability
@@ -253,9 +283,92 @@ scope, polished."
 
 ## 9. Trade-offs & future production considerations
 
-- **LLM cost/latency**: a live tool-use loop makes 3-6 Claude calls per query. At
-  production volume, a plan-then-execute pattern (§3.1) or caching repeated
-  sub-queries (e.g. "get open tickets") would reduce cost.
+### 9.1 LLM cost/latency, and when the live tool-use loop is the wrong choice
+
+A live tool-use loop makes 3-6 Claude calls per query, and — because each call resends
+the full conversation so far (system prompt, tool schemas, all prior tool results) —
+cost grows with how many rounds a given query needs, not just with the query itself.
+At Claude Sonnet 5 introductory pricing ($2/MTok input, $10/MTok output through Aug
+2026; $3/$15 after):
+
+| Query type | Tool-use turns | Approx. cost |
+|---|---|---|
+| Simple (e.g. "prioritise today's tickets") | 2-3 | ~$0.017 |
+| Typical (e.g. "summarise ETCH-07 alarms + likely causes") | 3-4 | ~$0.027 |
+| Heavy (compare historical cases + draft follow-up note) | 5-6 | ~$0.05 |
+
+For this demo's expected volume (a handful of engineers/managers, occasional queries)
+this is immaterial — total spend across development and a recorded demo comes to a few
+dollars. It stops being immaterial, and the live loop stops being the right choice,
+in a deployment where cost predictability and auditability matter as much as raw
+average cost — a government agency procuring this system is the clearest example:
+
+- **Cost predictability over lowest average cost.** Budget cycles and procurement
+  want a bounded, predictable per-query cost, not a variable 3-6 call range. A
+  **plan-then-execute** pattern (rejected above for being less adaptive) gives a
+  fixed ceiling of 2 LLM calls per query. A **bounded hybrid** — one Claude call
+  produces a plan, a deterministic router executes it, one Claude call synthesises
+  the answer, and *at most one* additional plan+execute round is allowed if the
+  synthesis step flags the evidence as insufficient — keeps most of the live loop's
+  adaptiveness while capping worst-case cost at 3 calls instead of 6.
+- **Auditability of the reasoning process, not just the answer.** A discrete "plan"
+  artifact that can be logged and reviewed before execution is a stronger compliance
+  story than an autonomous loop where "the AI decided on its own" which services to
+  call and in what order — relevant beyond just cost.
+- **Query routing before paying for reasoning at all.** Not every query needs an LLM.
+  "Which tickets should I prioritise" is fully answered by `recommendation-service`'s
+  deterministic scoring plus a templated sentence — zero LLM calls. Only queries that
+  genuinely require synthesising unstructured evidence (root-cause hypotheses,
+  cross-referencing historical cases) need Claude at all. A cheap classifier ahead of
+  the agent (keyword-based, no LLM required) routing prioritisation-type queries to
+  the deterministic path directly would cut LLM spend more than any change to the
+  orchestration pattern.
+- **Model tiering.** Orthogonal to the above: use a cheaper model (e.g. Haiku) for
+  low-judgment steps (intent classification, plan generation) and reserve Sonnet for
+  the step that needs real reasoning (final synthesis over evidence). Stacks with
+  either orchestration pattern.
+- **Deployment topology, not just orchestration.** Semiconductor fab operational data
+  can be strategically sensitive. A real government deployment might have a hard
+  data-residency requirement rather than a soft cost preference — Claude via a
+  GovCloud-hosted offering, or an on-prem/open-weight model, rather than the public
+  API. That is a different axis entirely from how the agent plans and calls tools,
+  and would need to be resolved before the cost question is even relevant.
+
+The first bullet's bounded hybrid and model-tiering levers were adopted into the demo
+itself (§3.1, §6.1) after this analysis — a cost-sensitive/regulated deployment context
+was the deciding factor, not a raw agentic-ness score. Query routing (skipping the LLM
+entirely for purely deterministic queries) and deployment topology (GovCloud/on-prem)
+were not implemented, and remain documented future work: query routing would add a
+pre-agent classification step outside this plan's scope, and topology is an
+infrastructure decision independent of the application code.
+
+### 9.2 Why async request submission was not considered for this demo
+
+Separate from event-driven *inter-service* calls (§3.1's table, rejected), a distinct
+pattern is decoupling the *user's request* from computation — returning a job ID
+immediately and having the client poll or receive a webhook once the answer is ready,
+instead of blocking on the HTTP connection through the full tool-use loop.
+
+This solves a specific, real problem: bursty, high-concurrency load against a
+rate-limited LLM API, where many simultaneous users would otherwise all block on open
+connections waiting on the same downstream (Anthropic) API, and queuing/backpressure
+is needed to smooth that load. That is a genuine production-scaling concern.
+
+It is not a problem this demo has, for three concrete reasons: the assessment's
+interaction model is conversational (a chat UX where the user expects an answer in
+the same exchange, not "check back later"); the expected concurrency is a handful of
+engineers/managers rather than hundreds of simultaneous requests; and two features
+work naturally under a synchronous model but would need real extra design under an
+async one — the "show me the evidence" follow-up (only meaningful immediately after an
+answer exists) and the human-in-the-loop "Save follow-up" action (reacts to a draft
+note still present in the response it's replying to). Building queue/job
+infrastructure to solve a load problem the demo doesn't have would be exactly the kind
+of unnecessary infrastructure complexity the brief asks candidates to avoid (§8 of the
+assessment brief: "do not spend excessive time on... infrastructure complexity").
+
+Rejected for this demo; the correct lever to reach for once real concurrent production
+load exists, not before.
+
 - **Knowledge retrieval**: TF-IDF is adequate for 3 documents; a real deployment with
   hundreds of SOPs would need a proper vector store and chunking strategy.
 - **Recurrence detection**: currently keyword/substring matching in
@@ -300,7 +413,8 @@ service-centre-agent/
 - `recommendation-service`: unit tests on the scoring formula (pure functions, no I/O).
 - `knowledge-service`: unit tests on search ranking for known queries.
 - `agent-orchestrator`: unit tests on the Pydantic output schema validation and the
-  ID-grounding check; one integration test that runs the tool-use loop against the four
+  ID-grounding check; one integration test that runs the full bounded
+  plan→execute→synthesise flow (including the one-revision path) against the four
   downstream services mocked with `respx`, so CI never calls the real Anthropic API.
 - Each REST service: a handful of endpoint tests via `httpx`'s `ASGITransport` against
   an in-memory/temp SQLite DB.
