@@ -18,7 +18,8 @@ URLS = dict(
 def _build_client(tmp_path, anthropic_client):
     app = create_app(
         anthropic_client=anthropic_client,
-        model="claude-sonnet-5",
+        planner_model="claude-haiku-4-5-20251001",
+        synthesis_model="claude-sonnet-5",
         audit_db_path=str(tmp_path / "audit.db"),
         static_dir=None,
         **URLS,
@@ -34,14 +35,22 @@ def test_health(tmp_path):
 
 @respx.mock
 def test_chat_endpoint_returns_structured_answer_and_persists_audit(tmp_path):
-    final_json = json.dumps({
-        "recommendation": "Prioritise TCK-002.",
-        "evidence": [],
-        "assumptions": [],
-        "confidence": "medium",
-        "next_action": "Investigate ETCH-07.",
+    plan_response = FakeResponse(content=[])
+    synthesis_json = json.dumps({
+        "answer": {
+            "recommendation": "Prioritise TCK-002.",
+            "evidence": [],
+            "assumptions": [],
+            "confidence": "medium",
+            "next_action": "Investigate ETCH-07.",
+        },
+        "sufficient": True,
+        "additional_tool_request": None,
     })
-    fake_client = FakeAnthropicClient([FakeResponse(content=[FakeTextBlock(text=final_json)])])
+    fake_client = FakeAnthropicClient([
+        plan_response,
+        FakeResponse(content=[FakeTextBlock(text=synthesis_json)]),
+    ])
     test_client = _build_client(tmp_path, fake_client)
 
     resp = test_client.post("/chat", json={"query": "which tickets first?"})

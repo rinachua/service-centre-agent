@@ -25,7 +25,8 @@ class FollowupCreateRequest(BaseModel):
 
 def create_app(
     anthropic_client,
-    model: str,
+    planner_model: str,
+    synthesis_model: str,
     ticket_url: str,
     equipment_url: str,
     knowledge_url: str,
@@ -51,7 +52,9 @@ def create_app(
             request_id=request_id,
         )
         try:
-            answer, trace = run_agent_loop(anthropic_client, model, body.query, executor)
+            answer, trace = run_agent_loop(
+                anthropic_client, planner_model, synthesis_model, body.query, executor,
+            )
         except anthropic.APIError as exc:
             raise HTTPException(status_code=502, detail=f"LLM provider error: {exc}") from exc
 
@@ -87,7 +90,8 @@ def create_app(
 
 app = create_app(
     anthropic_client=anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "")),
-    model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
+    planner_model=os.environ.get("CLAUDE_PLANNER_MODEL", "claude-haiku-4-5-20251001"),
+    synthesis_model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
     ticket_url=os.environ.get("TICKET_SERVICE_URL", "http://ticket-service:8001"),
     equipment_url=os.environ.get("EQUIPMENT_SERVICE_URL", "http://equipment-history-service:8002"),
     knowledge_url=os.environ.get("KNOWLEDGE_SERVICE_URL", "http://knowledge-service:8003"),
