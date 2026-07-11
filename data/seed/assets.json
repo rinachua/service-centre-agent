@@ -1,0 +1,7 @@
+[
+  {"tool_id": "ETCH-07", "line": "Line-A", "process_area": "Etch", "status": "Running", "recent_downtime_hours_7d": 4.5},
+  {"tool_id": "LITHO-03", "line": "Line-A", "process_area": "Litho", "status": "Running", "recent_downtime_hours_7d": 0.0},
+  {"tool_id": "CMP-02", "line": "Line-B", "process_area": "CMP", "status": "Down", "recent_downtime_hours_7d": 12.0},
+  {"tool_id": "DEP-05", "line": "Line-B", "process_area": "Deposition", "status": "Running", "recent_downtime_hours_7d": 2.0},
+  {"tool_id": "CLEAN-11", "line": "Line-A", "process_area": "Wet Clean", "status": "Idle", "recent_downtime_hours_7d": 1.0}
+]
