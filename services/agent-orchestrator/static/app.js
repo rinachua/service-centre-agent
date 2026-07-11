@@ -88,21 +88,41 @@ function appendAnswer(requestId, answer) {
   }
 
   const nextAction = document.createElement("p");
-  nextAction.innerHTML = `<strong>Next action:</strong> ${answer.next_action}`;
+  const nextActionLabel = document.createElement("strong");
+  nextActionLabel.textContent = "Next action:";
+  nextAction.appendChild(nextActionLabel);
+  nextAction.appendChild(document.createTextNode(` ${answer.next_action}`));
   el.appendChild(nextAction);
 
   if (answer.followup_note) {
     const note = answer.followup_note;
     const noteBox = document.createElement("div");
     noteBox.className = "followup-note";
-    noteBox.innerHTML = `
-      <h4>Draft follow-up note for ${note.ticket_id}</h4>
-      <p><strong>Summary:</strong> ${note.summary}</p>
-      <p><strong>Root cause:</strong> ${note.root_cause}</p>
-      <p><strong>Next action:</strong> ${note.next_action}</p>
-      <button class="save-followup">Save follow-up to ticket</button>
-    `;
-    noteBox.querySelector(".save-followup").addEventListener("click", async () => {
+
+    const noteTitle = document.createElement("h4");
+    noteTitle.textContent = `Draft follow-up note for ${note.ticket_id}`;
+    noteBox.appendChild(noteTitle);
+
+    const fields = [
+      ["Summary:", note.summary],
+      ["Root cause:", note.root_cause],
+      ["Next action:", note.next_action],
+    ];
+    fields.forEach(([label, value]) => {
+      const p = document.createElement("p");
+      const strong = document.createElement("strong");
+      strong.textContent = label;
+      p.appendChild(strong);
+      p.appendChild(document.createTextNode(` ${value}`));
+      noteBox.appendChild(p);
+    });
+
+    const saveButton = document.createElement("button");
+    saveButton.className = "save-followup";
+    saveButton.textContent = "Save follow-up to ticket";
+    noteBox.appendChild(saveButton);
+
+    saveButton.addEventListener("click", async () => {
       const resp = await fetch(`/tickets/${note.ticket_id}/followups`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -113,8 +133,8 @@ function appendAnswer(requestId, answer) {
         }),
       });
       if (resp.ok) {
-        noteBox.querySelector(".save-followup").textContent = "Saved";
-        noteBox.querySelector(".save-followup").disabled = true;
+        saveButton.textContent = "Saved";
+        saveButton.disabled = true;
       } else {
         appendError("Failed to save follow-up note.");
       }

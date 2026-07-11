@@ -8,6 +8,8 @@ from app.tools import TOOL_DEFS, ServiceError
 
 logger = logging.getLogger("agent-orchestrator")
 
+VALID_TOOL_NAMES = {tool_def["name"] for tool_def in TOOL_DEFS}
+
 PLAN_SYSTEM_PROMPT = """You are the planning stage of an assistant for a semiconductor
 equipment service centre. Given the user's question, decide which tool(s) to call to
 gather the evidence needed to answer it. Call every tool you think you will need in
@@ -228,10 +230,17 @@ def run_agent_loop(client, planner_model: str, synthesis_model: str, user_query:
         return _finalize(answer, trace)
 
     trace.revised = True
-    _execute_planned_calls(
-        [(additional.get("tool_name"), additional.get("input", {}) or {})],
-        tool_executor, trace,
-    )
+    revision_tool_name = additional.get("tool_name")
+    if revision_tool_name in VALID_TOOL_NAMES:
+        _execute_planned_calls(
+            [(revision_tool_name, additional.get("input", {}) or {})],
+            tool_executor, trace,
+        )
+    else:
+        logger.warning(
+            "Ignoring additional_tool_request with unrecognized tool_name: %r",
+            revision_tool_name,
+        )
 
     revised_answer = _synthesize_revision(client, synthesis_model, user_query, trace)
     if revised_answer is None:

@@ -204,3 +204,41 @@ def test_flags_injection_attempt_in_planned_tool_input():
 
     assert len(trace.injection_flags) == 1
     assert "Potential prompt-injection" in answer.assumptions[0]
+
+
+def test_ignores_invalid_tool_name_in_revision_request_without_crashing():
+    plan = _plan_response(FakeToolUseBlock(name="get_ticket", input={"ticket_id": "TCK-002"}, id="tu_1"))
+    first_synthesis = _text_response({
+        "answer": {
+            "recommendation": "Need more evidence.",
+            "evidence": [],
+            "assumptions": [],
+            "confidence": "low",
+            "next_action": "Pending more evidence.",
+        },
+        "sufficient": False,
+        "additional_tool_request": {"tool_name": "not_a_real_tool", "input": {"foo": "bar"}},
+    })
+    revision = _text_response({
+        "recommendation": "Prioritise TCK-002 based on available evidence.",
+        "evidence": [{"source": "ticket-service", "record_id": "TCK-002", "detail": "critical"}],
+        "assumptions": ["Could not gather additional evidence: unrecognized tool requested."],
+        "confidence": "low",
+        "next_action": "Dispatch engineer to ETCH-07.",
+    })
+    client = FakeAnthropicClient([plan, first_synthesis, revision])
+    executor = FakeToolExecutor(results={
+        "get_ticket": {"ticket_id": "TCK-002", "tool_id": "ETCH-07"},
+    })
+
+    answer, trace = run_agent_loop(
+        client, "claude-haiku-4-5-20251001", "claude-sonnet-5", "prioritise and explain", executor
+    )
+
+    assert trace.revised is True
+    assert len(client.calls) == 3
+    assert answer.recommendation == "Prioritise TCK-002 based on available evidence."
+    assert all(call["tool_name"] != "not_a_real_tool" for call in trace.tool_calls)
+    assert ("not_a_real_tool", {"foo": "bar"}) not in executor.calls
+    assert len(trace.tool_calls) == 1
+    assert trace.tool_calls[0]["tool_name"] == "get_ticket"

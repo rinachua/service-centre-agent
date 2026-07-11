@@ -91,7 +91,11 @@ Cross-cutting to every step:
   failure the orchestrator continues with partial evidence and records the gap in
   `assumptions`, never surfacing a bare 500 to the user.
 - **Prompt-injection scanning**: every planned tool call's input is scanned before
-  execution, in both the initial plan and the one optional revision round.
+  execution, in both the initial plan and the one optional revision round. This covers
+  tool *inputs* only — tool *results* (e.g. text inside a retrieved ticket or knowledge
+  document) are not separately scanned; the mitigation for injected content reaching the
+  synthesis model via a result is the synthesis system prompt's instruction to treat
+  tool results as data, not instructions. Result-side scanning is future work.
 - **Human-in-the-loop writes**: the agent only ever drafts a follow-up note. Saving
   it to `ticket-service` is a separate, explicit UI action.
 

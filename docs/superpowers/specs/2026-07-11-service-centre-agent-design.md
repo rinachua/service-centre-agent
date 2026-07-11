@@ -262,11 +262,15 @@ procedural.
 - Structured JSON logs to stdout from every service (request id, method, path, latency,
   status) — visible via `docker compose logs`.
 - `agent-orchestrator` additionally writes one `audit_log` row per request: user query,
-  ordered list of tool calls (name, args, result summary, latency), grounding-check
-  outcome, final answer, total latency. Retrievable via `GET /audit/{request_id}`, which
-  is what answers "show me the evidence behind your recommendation" at the trace level
-  (the structured `evidence` field in the chat response answers it at the
-  answer level).
+  the ordered list of tool calls made (name, input, result, error — no per-call
+  latency), any prompt-injection flags raised, and the final answer (whose `evidence`
+  entries each carry a `verified` flag, the only place the grounding-check outcome is
+  recorded — there is no separate grounding-outcome column), plus `created_at`.
+  Retrievable via `GET /audit/{request_id}`, which is what answers "show me the
+  evidence behind your recommendation" at the trace level (the structured `evidence`
+  field in the chat response answers it at the answer level). Per-request total latency
+  is not stored in this table; it is captured separately in the structured stdout logs
+  described above.
 - A `request_id` (UUID) is generated per `/chat` call and passed as a header on every
   downstream REST call, so log lines across services can be correlated by grepping one
   ID — a lightweight stand-in for distributed tracing.
