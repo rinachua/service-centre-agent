@@ -22,8 +22,10 @@ Four example queries define the acceptance bar:
 - Synthetic data only; no proprietary or confidential content.
 - User is already authenticated upstream (e.g. by an API gateway); this system does not
   implement login. See §8 for the access-control assumption in detail.
-- A real Claude API key is available and used for the LLM component (`ANTHROPIC_API_KEY`
-  env var). No mock LLM mode is implemented, per user decision.
+- A real Claude API key is expected and used for the LLM component when available
+  (`ANTHROPIC_API_KEY` env var). If no key is set, the system automatically falls back to
+  a deterministic, rule-based offline responder — see §6.6 — rather than failing; this
+  satisfies the assessment brief's §8 constraint for a documented local/mock substitute.
 - "Microservices" run as separate Docker Compose containers, each independently
   runnable and testable.
 - Reasoning depth targets the assessment's "minimum functional scope, polished" bar —
@@ -121,10 +123,10 @@ date, resolution, parts_replaced`.
 ### 4.3 knowledge-service (port 8003)
 
 Retrieval over unstructured documents: troubleshooting guides, SOP excerpts, shift
-handover notes. Implemented with TF-IDF + cosine similarity (`scikit-learn`) — no
-embedding API calls, no vector DB, deterministic and free to run. Realistic for a
-3-document corpus; documented in §9 as the first thing to swap for a real vector store
-at production scale.
+handover notes. Implemented with hand-rolled, pure-Python TF-IDF + cosine similarity
+(no `scikit-learn`) — no embedding API calls, no vector DB, deterministic and free to
+run. Realistic for a 3-document corpus; documented in §9 as the first thing to swap for
+a real vector store at production scale.
 
 | Endpoint | Purpose |
 |---|---|
@@ -251,10 +253,14 @@ prompt-level grounding instructions, but a backstop against them failing.
 
 Tool results (especially knowledge-service snippets, which contain free-text shift
 notes) are treated as untrusted data: the system prompt explicitly instructs Claude to
-treat tool output as information, not instructions, and the orchestrator scans
-retrieved text for common prompt-injection phrasing (e.g. "ignore previous
-instructions") and logs a warning if found. Documented as a basic mitigation, not a
-comprehensive defence.
+treat tool output as information, not instructions. Separately, the orchestrator scans
+every planned tool call's *input* (the arguments Claude requests a tool be called with,
+not the data that tool returns) for common prompt-injection phrasing (e.g. "ignore
+previous instructions") and logs a warning if found. This covers tool inputs only —
+tool *results* are not separately scanned; the mitigation for injected content reaching
+the synthesis model via a retrieved result is the system-prompt instruction above, not a
+scanner. Documented as a basic mitigation, not a comprehensive defence; result-side
+scanning is future work.
 
 ### 6.4 Write actions are human-gated
 
@@ -325,7 +331,7 @@ Alternatives considered and rejected:
 
 | Approach | Why rejected |
 |---|---|
-| Skip planning/synthesis entirely when no key; just run a fixed set of tool calls and return raw results | Does not preserve the tool-calling *flow* the brief requires — no real planning happens, and there's no structured recommendation/evidence/assumptions (§3.4's required answer shape), which is exactly what's being assessed. |
+| Skip planning/synthesis entirely when no key; just run a fixed set of tool calls and return raw results | Does not preserve the tool-calling *flow* the brief requires — no real planning happens, and there's no structured recommendation/evidence/assumptions (§6.2's required answer shape), which is exactly what's being assessed. |
 | A separate `?mock=true` opt-in flag or parallel code path | Two flows to keep in sync instead of one; doesn't help someone who just runs `docker compose up` without knowing to set a flag — the goal is zero-friction, not an extra step. |
 
 Honesty/transparency: `OfflineResponder`'s answers always carry `confidence: "low"` and an
