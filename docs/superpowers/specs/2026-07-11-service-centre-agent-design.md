@@ -148,9 +148,10 @@ The only service exposed to the user. Responsibilities:
 - `POST /chat` — conversational endpoint, runs the bounded plan→execute→synthesise flow
   (§6.1), returns the structured answer (§6.2).
 - `GET /audit/{request_id}` — replay the full tool-call trace for a prior request.
-- Holds the Claude client (planner model + synthesis model), tool schema (mapped 1:1 to
-  the REST endpoints above), system prompts, grounding checks, retry/fallback logic, and
-  the `audit_log` SQLite table.
+- Holds the Claude client (planner model + synthesis model; automatically substituted
+  with the offline `OfflineResponder` fallback when `ANTHROPIC_API_KEY` is unset — §6.6),
+  tool schema (mapped 1:1 to the REST endpoints above), system prompts, grounding checks,
+  retry/fallback logic, and the `audit_log` SQLite table.
 
 ## 5. Data model / synthetic dataset
 
@@ -171,27 +172,38 @@ Fab-flavored synthetic data, seeded via `scripts/seed_data.py` per service on st
 
 ### 6.1 Planning & tool use (bounded hybrid: plan → execute → synthesise, ≤1 revision)
 
-Three phases, at most 3 Claude calls total (2 in the common case):
+Three phases, at most 3 Claude calls total (2 in the common case). Every "Claude call"
+below is a real, live call to the Anthropic API whenever `ANTHROPIC_API_KEY` is set —
+that's the default, full-fledged mode. When no key is present, `app/main.py` automatically
+substitutes the deterministic `OfflineResponder` (§6.6) in place of the real client instead
+— same steps, same call count, same JSON contracts, only the source of the plan/synthesis
+answers changes. The rest of this section describes the live-mode behaviour; §6.6 covers
+exactly how the fallback answers the same two call sites.
 
-1. **Plan** (cheap model, e.g. Haiku). System prompt + the same 7-tool schema (§4.5) +
-   the user query, called with `tool_choice: "any"` so the response is only tool_use
-   blocks — no free text, no execution yet. Claude may request multiple tool calls in
-   this single response (e.g. `get_tickets` and `get_equipment` together); the
-   orchestrator treats the full set of returned tool_use blocks as "the plan."
-2. **Execute** (deterministic, no LLM). The orchestrator's router runs exactly the
-   planned tool calls against the 4 backend services via the same `ToolExecutor`
-   (§4.5) used previously, with the same per-call timeout/retry/error-containment
-   behaviour (§6.5) — a `ServiceError` here never crashes the request.
-3. **Synthesise** (full model, e.g. Sonnet). User query + all tool results are sent to
+1. **Plan** (cheap model, e.g. Haiku, or the offline fallback's keyword heuristics — §6.6
+   — if no key is set). System prompt + the same 7-tool schema (§4.5) + the user query,
+   called with `tool_choice: "any"` so the response is only tool_use blocks — no free
+   text, no execution yet. Claude may request multiple tool calls in this single
+   response (e.g. `get_tickets` and `get_equipment` together); the orchestrator treats
+   the full set of returned tool_use blocks as "the plan."
+2. **Execute** (deterministic, no LLM either way). The orchestrator's router runs
+   exactly the planned tool calls against the 4 backend services via the same
+   `ToolExecutor` (§4.5) used previously, with the same per-call timeout/retry/error-
+   containment behaviour (§6.5) — a `ServiceError` here never crashes the request.
+3. **Synthesise** (full model, e.g. Sonnet, or the offline fallback's templated
+   answer-builder — §6.6 — if no key is set). User query + all tool results are sent to
    Claude, which returns a JSON object containing a best-effort `answer` (§6.2's
    schema), plus `sufficient: bool` and, if `false`, one `additional_tool_request`
    naming exactly one more tool call it needs.
-4. **Optional single revision.** If `sufficient` was `false` and no revision has run
-   yet for this request, the orchestrator executes that one additional tool call
-   (step 2 again, deterministic) and calls Claude once more to synthesise (step 3
-   again) — but this final round has no `sufficient`/`additional_tool_request` fields
-   in its expected output, so no further revision can be requested. Worst case: plan
-   (1) + synthesise (1) + revise-synthesise (1) = 3 Claude calls, never more.
+4. **Optional single revision (live mode only).** If `sufficient` was `false` and no
+   revision has run yet for this request, the orchestrator executes that one additional
+   tool call (step 2 again, deterministic) and calls Claude once more to synthesise
+   (step 3 again) — but this final round has no `sufficient`/`additional_tool_request`
+   fields in its expected output, so no further revision can be requested. Worst case:
+   plan (1) + synthesise (1) + revise-synthesise (1) = 3 Claude calls, never more. The
+   offline fallback always reports `sufficient: true`, so this step never fires when
+   there's no API key — a deliberate scope reduction (§6.6) since the revision path is
+   already fully covered by `test_loop.py`'s unit tests against the real contract.
 
 This recovers most of a fully open loop's value (a wrong first plan can still be
 corrected once, e.g. escalate to knowledge-service if history alone didn't explain the
