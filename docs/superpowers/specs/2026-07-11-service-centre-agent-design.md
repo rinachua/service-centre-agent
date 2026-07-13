@@ -264,7 +264,7 @@ documented local/mock substitute if API access is not available," and that "any 
 should preserve the intended architecture and tool-calling flow." This section documents
 that substitute.
 
-**Approach chosen: real Claude by default, with an automatic offline fallback.** The
+**Approach chosen: direct Claude API call by default, with an offline fallback.** The
 orchestrator always tries to use the real Anthropic API; only when no `ANTHROPIC_API_KEY`
 is present does it substitute a rule-based stand-in, entirely automatically, with no flag
 or configuration needed beyond the key's presence. Mechanically, this works by swapping
