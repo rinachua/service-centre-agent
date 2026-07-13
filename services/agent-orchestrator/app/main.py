@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from app import audit as audit_module
 from app.loop import run_agent_loop
 from app.logging_middleware import RequestIDMiddleware, configure_logging
+from app.offline_responder import OfflineResponder
 from app.tools import ToolExecutor
 
 
@@ -88,8 +89,18 @@ def create_app(
     return app
 
 
+def _build_anthropic_client() -> object:
+    """Picks the real Anthropic client when ANTHROPIC_API_KEY is set, or a deterministic
+    rule-based OfflineResponder otherwise, so the full demo runs with zero setup when no
+    key is available. Both implement the same duck-typed `.messages.create(**kwargs)`
+    interface app/loop.py expects. See spec §6.6."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    return OfflineResponder()
+
+
 app = create_app(
-    anthropic_client=anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "")),
+    anthropic_client=_build_anthropic_client(),
     planner_model=os.environ.get("CLAUDE_PLANNER_MODEL", "claude-haiku-4-5-20251001"),
     synthesis_model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
     ticket_url=os.environ.get("TICKET_SERVICE_URL", "http://ticket-service:8001"),
