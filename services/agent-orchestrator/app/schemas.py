@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,4 +23,4 @@ class AgentAnswer(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     confidence: Literal["low", "medium", "high"]
     next_action: str
-    followup_note: Optional[FollowupNote] = None
+    followup_note: FollowupNote | None = None

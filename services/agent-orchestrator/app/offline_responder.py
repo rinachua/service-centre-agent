@@ -136,13 +136,22 @@ def _build_answer(user_query: str, tool_calls: list[dict]) -> dict:
     tool_names_called = {c["tool_name"] for c in tool_calls}
 
     if "score_priority" in tool_names_called:
-        recommendation = "Based on deterministic priority scoring, review the top-ranked ticket(s) listed in evidence first."
+        recommendation = (
+            "Based on deterministic priority scoring, review the top-ranked ticket(s) "
+            "listed in evidence first."
+        )
         next_action = "Confirm the top-ranked ticket with the assigned engineer and dispatch accordingly."
     elif "get_equipment_history" in tool_names_called:
-        recommendation = "Recent alarm/maintenance history for the requested tool is listed in evidence; look for recurring codes as the likely cause."
+        recommendation = (
+            "Recent alarm/maintenance history for the requested tool is listed in "
+            "evidence; look for recurring codes as the likely cause."
+        )
         next_action = "Have an engineer review the alarm history for recurring patterns before further troubleshooting."
     elif "search_knowledge" in tool_names_called or "search_history" in tool_names_called:
-        recommendation = "Related historical cases and/or knowledge-base excerpts are listed in evidence for comparison."
+        recommendation = (
+            "Related historical cases and/or knowledge-base excerpts are listed in "
+            "evidence for comparison."
+        )
         next_action = "Cross-check the current issue against the retrieved cases/guides before proceeding."
     else:
         recommendation = "Open tickets are listed in evidence; no further ranking or history lookup was requested."

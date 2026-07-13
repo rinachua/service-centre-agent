@@ -2,7 +2,6 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 
@@ -23,7 +22,7 @@ def create_app(db_path: str, seed_path: Path) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/tickets", response_model=list[Ticket])
-    def list_tickets(status: Optional[str] = None, tool_id: Optional[str] = None):
+    def list_tickets(status: str | None = None, tool_id: str | None = None):
         query = "SELECT * FROM tickets WHERE 1=1"
         params: list[str] = []
         if status:

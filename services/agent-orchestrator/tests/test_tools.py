@@ -1,14 +1,13 @@
 import httpx
 import respx
-
 from app.tools import TOOL_DEFS, ServiceError, ToolExecutor
 
-URLS = dict(
-    ticket_url="http://ticket-service:8001",
-    equipment_url="http://equipment:8002",
-    knowledge_url="http://knowledge:8003",
-    recommendation_url="http://recommendation:8004",
-)
+URLS = {
+    "ticket_url": "http://ticket-service:8001",
+    "equipment_url": "http://equipment:8002",
+    "knowledge_url": "http://knowledge:8003",
+    "recommendation_url": "http://recommendation:8004",
+}
 
 
 def _executor():
@@ -31,7 +30,7 @@ def test_get_ticket_raises_service_error_on_404():
     )
     try:
         _executor().execute("get_ticket", {"ticket_id": "TCK-999"})
-        assert False, "expected ServiceError"
+        raise AssertionError("expected ServiceError")
     except ServiceError as exc:
         assert "404" in exc.detail
 
@@ -108,6 +107,6 @@ def test_tool_defs_names_match_executor_dispatch():
 def test_execute_unknown_tool_raises_value_error():
     try:
         _executor().execute("not_a_real_tool", {})
-        assert False, "expected ValueError"
+        raise AssertionError("expected ValueError")
     except ValueError:
         pass

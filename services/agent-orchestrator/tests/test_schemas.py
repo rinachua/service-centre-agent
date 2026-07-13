@@ -1,7 +1,6 @@
 import pytest
-from pydantic import ValidationError
-
 from app.schemas import AgentAnswer
+from pydantic import ValidationError
 
 
 def test_agent_answer_rejects_invalid_confidence():

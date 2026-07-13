@@ -1,8 +1,7 @@
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from app.main import create_app
+from fastapi.testclient import TestClient
 
 SEED_PATH = Path(__file__).parent.parent.parent.parent / "data" / "seed"
 

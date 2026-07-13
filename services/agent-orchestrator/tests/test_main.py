@@ -3,18 +3,18 @@ import json
 import anthropic
 import httpx
 import respx
-from fastapi.testclient import TestClient
-
 from app.main import _build_anthropic_client, create_app
 from app.offline_responder import OfflineResponder
+from fastapi.testclient import TestClient
+
 from tests.fakes import FakeAnthropicClient, FakeResponse, FakeTextBlock
 
-URLS = dict(
-    ticket_url="http://ticket-service:8001",
-    equipment_url="http://equipment:8002",
-    knowledge_url="http://knowledge:8003",
-    recommendation_url="http://recommendation:8004",
-)
+URLS = {
+    "ticket_url": "http://ticket-service:8001",
+    "equipment_url": "http://equipment:8002",
+    "knowledge_url": "http://knowledge:8003",
+    "recommendation_url": "http://recommendation:8004",
+}
 
 
 def _build_client(tmp_path, anthropic_client):

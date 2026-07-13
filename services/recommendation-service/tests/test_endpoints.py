@@ -1,8 +1,7 @@
 from datetime import datetime, timezone
 
-from fastapi.testclient import TestClient
-
 from app.main import create_app
+from fastapi.testclient import TestClient
 
 
 def test_priority_score_endpoint_ranks_tickets():

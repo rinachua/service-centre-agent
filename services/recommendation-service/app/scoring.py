@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from typing import Optional
 
 SEVERITY_WEIGHTS = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
 
@@ -10,7 +9,7 @@ def normalize(value: float, max_value: float) -> float:
     return min(value / max_value, 1.0)
 
 
-def age_days(created_at: str, now: Optional[datetime] = None) -> float:
+def age_days(created_at: str, now: datetime | None = None) -> float:
     now = now or datetime.now(timezone.utc)
     created = datetime.fromisoformat(created_at)
     if created.tzinfo is None:

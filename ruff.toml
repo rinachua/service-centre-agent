@@ -1,0 +1,12 @@
+# Shared lint config for all 5 services (services/*/app, services/*/tests).
+# Ruff auto-discovers this file from any subdirectory, so `ruff check .` run from
+# inside any service folder picks it up without extra flags.
+
+line-length = 120
+extend-exclude = [".venv", "__pycache__"]
+
+[lint]
+# Sensible, low-noise defaults for a small FastAPI codebase: pycodestyle errors/warnings,
+# pyflakes (unused imports/vars), isort (import order), pyupgrade (modern syntax),
+# bugbear (common bug patterns), flake8-simplify, flake8-comprehensions.
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4"]

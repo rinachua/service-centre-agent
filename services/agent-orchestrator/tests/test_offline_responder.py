@@ -1,13 +1,17 @@
 import json
 
 from app.loop import (
-    AgentTrace,
     PLAN_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
+    AgentTrace,
     _build_synthesis_prompt,
     run_agent_loop,
 )
-from app.offline_responder import OfflineResponder, _parse_tool_results_text, _plan_tools
+from app.offline_responder import (
+    OfflineResponder,
+    _parse_tool_results_text,
+    _plan_tools,
+)
 from app.tools import TOOL_DEFS
 
 
@@ -58,7 +62,11 @@ def test_synthesis_prompt_round_trips_through_parser():
     prompt = _build_synthesis_prompt("test query", trace)
     results_text = prompt.split("\n\nTool results:\n", 1)[1]
     parsed = _parse_tool_results_text(results_text)
-    assert parsed[0] == {"tool_name": "get_tickets", "result": [{"ticket_id": "TCK-001", "severity": "critical"}], "error": None}
+    assert parsed[0] == {
+        "tool_name": "get_tickets",
+        "result": [{"ticket_id": "TCK-001", "severity": "critical"}],
+        "error": None,
+    }
     assert parsed[1] == {"tool_name": "get_equipment_history", "result": None, "error": "unreachable after retry"}
 
 

@@ -2,7 +2,13 @@ import json
 
 from app.loop import run_agent_loop
 from app.tools import ServiceError
-from tests.fakes import FakeAnthropicClient, FakeResponse, FakeTextBlock, FakeToolUseBlock
+
+from tests.fakes import (
+    FakeAnthropicClient,
+    FakeResponse,
+    FakeTextBlock,
+    FakeToolUseBlock,
+)
 
 
 class FakeToolExecutor:

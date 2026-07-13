@@ -2,17 +2,22 @@ import json
 
 import httpx
 import respx
+from app.main import create_app
 from fastapi.testclient import TestClient
 
-from app.main import create_app
-from tests.fakes import FakeAnthropicClient, FakeResponse, FakeTextBlock, FakeToolUseBlock
-
-URLS = dict(
-    ticket_url="http://ticket-service:8001",
-    equipment_url="http://equipment:8002",
-    knowledge_url="http://knowledge:8003",
-    recommendation_url="http://recommendation:8004",
+from tests.fakes import (
+    FakeAnthropicClient,
+    FakeResponse,
+    FakeTextBlock,
+    FakeToolUseBlock,
 )
+
+URLS = {
+    "ticket_url": "http://ticket-service:8001",
+    "equipment_url": "http://equipment:8002",
+    "knowledge_url": "http://knowledge:8003",
+    "recommendation_url": "http://recommendation:8004",
+}
 
 
 def _build_app(tmp_path, anthropic_client):

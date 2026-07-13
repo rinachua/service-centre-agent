@@ -8,8 +8,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import audit as audit_module
-from app.loop import run_agent_loop
 from app.logging_middleware import RequestIDMiddleware, configure_logging
+from app.loop import run_agent_loop
 from app.offline_responder import OfflineResponder
 from app.tools import ToolExecutor
 

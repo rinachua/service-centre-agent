@@ -1,6 +1,5 @@
-from fastapi.testclient import TestClient
-
 from app.main import create_app
+from fastapi.testclient import TestClient
 
 
 def test_search_endpoint_returns_results(tmp_path):
