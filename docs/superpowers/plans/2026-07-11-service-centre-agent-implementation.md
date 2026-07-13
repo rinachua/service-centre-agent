@@ -3909,6 +3909,487 @@ git commit -m "docs: write final README and architecture documentation"
 
 ---
 
+## Task 15: agent-orchestrator — offline fallback when no ANTHROPIC_API_KEY
+
+> New task, added after the initial 14-task build and the bounded-hybrid rework, in
+> direct response to the assessment brief's §8 constraint: "The solution should use a
+> real LLM API or a clearly documented local/mock substitute if API access is not
+> available. Any mock should preserve the intended architecture and tool-calling flow."
+> See spec §6.6 for the full rationale and rejected alternatives. This task does NOT
+> modify `app/loop.py`, `app/tools.py`, or `app/schemas.py` — only adds one new file and
+> changes one conditional in `app/main.py`'s bootstrap.
+
+**Files:**
+- Create: `services/agent-orchestrator/app/offline_responder.py`
+- Modify: `services/agent-orchestrator/app/main.py` (module-level `app = create_app(...)` bootstrap only)
+- Test: `services/agent-orchestrator/tests/test_offline_responder.py`
+
+**Interfaces:**
+- Consumes: `PLAN_SYSTEM_PROMPT`, `SYNTHESIS_SYSTEM_PROMPT`, `REVISION_SYSTEM_PROMPT`, `_build_synthesis_prompt` (imported from `app.loop`, read-only — not modified); `TOOL_DEFS` names (`app.tools`, for reference only, not imported — the heuristics below hardcode the same 7 names since importing would create a needless coupling for a lookup table this small).
+- Produces: `OfflineResponder` — a class implementing the same duck-typed interface `run_agent_loop` already expects of any Claude client (`.messages.create(**kwargs) -> object with .content`). Consumed only by `app/main.py`'s bootstrap; no other task depends on this one.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `services/agent-orchestrator/tests/test_offline_responder.py`:
+
+```python
+import json
+
+from app.loop import (
+    AgentTrace,
+    PLAN_SYSTEM_PROMPT,
+    SYNTHESIS_SYSTEM_PROMPT,
+    _build_synthesis_prompt,
+    run_agent_loop,
+)
+from app.offline_responder import OfflineResponder, _parse_tool_results_text, _plan_tools
+from app.tools import TOOL_DEFS
+
+
+def test_plan_tools_prioritise_query_calls_score_priority():
+    planned = _plan_tools("Which open equipment tickets should I prioritise today and why?")
+    assert ("score_priority", {}) in planned
+
+
+def test_plan_tools_tool_id_query_calls_get_equipment_history():
+    planned = _plan_tools("For tool ETCH-07, summarise the recent alarm history and likely causes.")
+    assert ("get_equipment_history", {"tool_id": "ETCH-07"}) in planned
+
+
+def test_plan_tools_followup_query_calls_get_tickets_or_get_ticket():
+    planned = _plan_tools("Generate a structured service follow-up note for the engineer.")
+    names = [name for name, _ in planned]
+    assert "get_tickets" in names or "get_ticket" in names
+
+
+def test_plan_tools_never_returns_empty():
+    planned = _plan_tools("hello")
+    assert len(planned) >= 1
+
+
+def test_plan_tools_only_returns_known_tool_names():
+    valid_names = {t["name"] for t in TOOL_DEFS}
+    for query in [
+        "Which open equipment tickets should I prioritise today and why?",
+        "For tool ETCH-07, summarise the recent alarm history and likely causes.",
+        "Compare this issue against similar historical cases and suggest next troubleshooting steps.",
+        "Generate a structured service follow-up note for the engineer.",
+    ]:
+        for name, _ in _plan_tools(query):
+            assert name in valid_names
+
+
+def test_synthesis_prompt_round_trips_through_parser():
+    """Pins _build_synthesis_prompt's text format against the offline parser — if loop.py's
+    prompt format ever changes, this test fails immediately instead of offline mode silently
+    breaking."""
+    trace = AgentTrace()
+    trace.tool_calls = [
+        {"tool_name": "get_tickets", "input": {"status": "open"},
+         "result": [{"ticket_id": "TCK-001", "severity": "critical"}], "error": None},
+        {"tool_name": "get_equipment_history", "input": {"tool_id": "ETCH-07"},
+         "result": None, "error": "unreachable after retry"},
+    ]
+    prompt = _build_synthesis_prompt("test query", trace)
+    results_text = prompt.split("\n\nTool results:\n", 1)[1]
+    parsed = _parse_tool_results_text(results_text)
+    assert parsed[0] == {"tool_name": "get_tickets", "result": [{"ticket_id": "TCK-001", "severity": "critical"}], "error": None}
+    assert parsed[1] == {"tool_name": "get_equipment_history", "result": None, "error": "unreachable after retry"}
+
+
+def test_synthesis_prompt_round_trips_with_no_tool_results():
+    trace = AgentTrace()
+    prompt = _build_synthesis_prompt("test query", trace)
+    results_text = prompt.split("\n\nTool results:\n", 1)[1]
+    assert _parse_tool_results_text(results_text) == []
+
+
+def test_offline_responder_plan_call_returns_tool_use_blocks():
+    responder = OfflineResponder()
+    response = responder.messages.create(
+        model="offline", max_tokens=1024, system=PLAN_SYSTEM_PROMPT,
+        tools=TOOL_DEFS, tool_choice={"type": "any"},
+        messages=[{"role": "user", "content": "Which open equipment tickets should I prioritise today and why?"}],
+    )
+    assert all(b.type == "tool_use" for b in response.content)
+    assert any(b.name == "score_priority" for b in response.content)
+
+
+def test_offline_responder_synthesis_call_returns_valid_answer_json():
+    responder = OfflineResponder()
+    trace = AgentTrace()
+    trace.tool_calls = [
+        {"tool_name": "score_priority", "input": {},
+         "result": [{"ticket_id": "TCK-002", "score": 0.91, "recurrence_count": 3}], "error": None},
+    ]
+    prompt = _build_synthesis_prompt("Which open equipment tickets should I prioritise today and why?", trace)
+    response = responder.messages.create(
+        model="offline", max_tokens=1500, system=SYNTHESIS_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = "".join(b.text for b in response.content if b.type == "text")
+    parsed = json.loads(text)
+    assert parsed["sufficient"] is True
+    assert parsed["additional_tool_request"] is None
+    assert parsed["answer"]["confidence"] == "low"
+    assert any(e["record_id"] == "TCK-002" for e in parsed["answer"]["evidence"])
+    assert "offline demo mode" in parsed["answer"]["assumptions"][0]
+
+
+def test_offline_responder_runs_through_full_run_agent_loop():
+    """End-to-end proof that OfflineResponder satisfies run_agent_loop's real contract —
+    same test double pattern the FakeAnthropicClient tests already use, but exercising the
+    actual rule-based responder instead of scripted fixtures."""
+
+    class _StubToolExecutor:
+        raw_results: list = []
+
+        def execute(self, tool_name, tool_input):
+            self.raw_results = [{"ticket_id": "TCK-002", "score": 0.91}]
+            return [{"ticket_id": "TCK-002", "score": 0.91}]
+
+    answer, trace = run_agent_loop(
+        OfflineResponder(), "offline-planner", "offline-synth",
+        "Which open equipment tickets should I prioritise today and why?",
+        _StubToolExecutor(),
+    )
+    assert answer.confidence == "low"
+    assert trace.revised is False
+    assert len(trace.tool_calls) >= 1
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run (from `services/agent-orchestrator/`): `python -m pytest tests/test_offline_responder.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.offline_responder'`.
+
+- [ ] **Step 3: Write `app/offline_responder.py`**
+
+```python
+import json
+import re
+
+from app.loop import REVISION_SYSTEM_PROMPT
+
+_TOOL_ID_RE = re.compile(r"\b[A-Z]{2,}-\d+\b")
+_TICKET_ID_RE = re.compile(r"\bTCK-\d+\b")
+
+_PRIORITIZE_WORDS = ("priorit", "rank")
+_HISTORY_WORDS = ("history", "alarm", "recur", "similar", "compare", "cause", "historical")
+_KNOWLEDGE_WORDS = ("troubleshoot", "sop", " guide", "shift note", "procedure")
+_FOLLOWUP_WORDS = ("follow-up", "follow up", "generate a", "structured service")
+
+_ID_FIELDS = ("ticket_id", "record_id", "doc_id", "tool_id")
+_SOURCE_LABELS = {
+    "get_tickets": "ticket-service",
+    "get_ticket": "ticket-service",
+    "get_equipment": "equipment-history-service",
+    "get_equipment_history": "equipment-history-service",
+    "search_history": "equipment-history-service",
+    "search_knowledge": "knowledge-service",
+    "score_priority": "recommendation-service",
+}
+
+_RESULT_LINE_RE = re.compile(r"^Tool (\w+)\(.*?\) (returned|FAILED): (.*)$")
+
+
+class _TextBlock:
+    type = "text"
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _ToolUseBlock:
+    type = "tool_use"
+
+    def __init__(self, name: str, input: dict, id: str):
+        self.name = name
+        self.input = input
+        self.id = id
+
+
+class _Response:
+    def __init__(self, content: list):
+        self.content = content
+
+
+def _plan_tools(query: str) -> list[tuple[str, dict]]:
+    """Rule-based stand-in for Claude's planning call. Openly heuristic, not real
+    reasoning — see spec §6.6."""
+    lower = query.lower()
+    planned: list[tuple[str, dict]] = []
+
+    tool_id_match = _TOOL_ID_RE.search(query)
+    ticket_id_match = _TICKET_ID_RE.search(query)
+
+    if any(w in lower for w in _PRIORITIZE_WORDS):
+        planned.append(("score_priority", {}))
+
+    if tool_id_match:
+        planned.append(("get_equipment_history", {"tool_id": tool_id_match.group(0)}))
+    elif any(w in lower for w in _HISTORY_WORDS):
+        planned.append(("search_history", {"query": query}))
+
+    if any(w in lower for w in _KNOWLEDGE_WORDS):
+        planned.append(("search_knowledge", {"query": query, "top_k": 5}))
+
+    if any(w in lower for w in _FOLLOWUP_WORDS):
+        if ticket_id_match:
+            planned.append(("get_ticket", {"ticket_id": ticket_id_match.group(0)}))
+        else:
+            planned.append(("get_tickets", {"status": "open"}))
+
+    if not planned:
+        planned.append(("get_tickets", {"status": "open"}))
+
+    seen = set()
+    deduped = []
+    for name, input_ in planned:
+        key = (name, tuple(sorted(input_.items())))
+        if key not in seen:
+            seen.add(key)
+            deduped.append((name, input_))
+    return deduped
+
+
+def _parse_tool_results_text(results_text: str) -> list[dict]:
+    """Recovers a tool_calls-shaped list from _build_synthesis_prompt's rendered text
+    (app/loop.py). See spec §6.6 for why this parses text rather than receiving trace
+    directly: OfflineResponder must satisfy the exact same call signature the real
+    Anthropic SDK exposes, so it only ever sees the same prompt text a real Claude call
+    would."""
+    if results_text.strip() == "(no tool results)":
+        return []
+    parsed = []
+    for line in results_text.splitlines():
+        m = _RESULT_LINE_RE.match(line)
+        if not m:
+            continue
+        tool_name, status, payload = m.groups()
+        if status == "FAILED":
+            parsed.append({"tool_name": tool_name, "result": None, "error": payload})
+        else:
+            try:
+                result = json.loads(payload)
+            except json.JSONDecodeError:
+                result = None
+            parsed.append({"tool_name": tool_name, "result": result, "error": None})
+    return parsed
+
+
+def _extract_evidence(tool_calls: list[dict]) -> list[dict]:
+    evidence = []
+    for call in tool_calls:
+        if call["error"] or call["result"] is None:
+            continue
+        items = call["result"] if isinstance(call["result"], list) else [call["result"]]
+        source = _SOURCE_LABELS.get(call["tool_name"], call["tool_name"])
+        for item in items[:3]:
+            if not isinstance(item, dict):
+                continue
+            record_id = next((item[f] for f in _ID_FIELDS if f in item), None)
+            if not record_id:
+                continue
+            detail_bits = {k: v for k, v in item.items() if k not in _ID_FIELDS}
+            detail = ", ".join(f"{k}={v}" for k, v in list(detail_bits.items())[:3])
+            evidence.append({"source": source, "record_id": record_id, "detail": detail or "see raw result"})
+    return evidence
+
+
+def _build_answer(user_query: str, tool_calls: list[dict]) -> dict:
+    evidence = _extract_evidence(tool_calls)
+    errors = [c["tool_name"] for c in tool_calls if c["error"]]
+    lower = user_query.lower()
+    tool_names_called = {c["tool_name"] for c in tool_calls}
+
+    if "score_priority" in tool_names_called:
+        recommendation = "Based on deterministic priority scoring, review the top-ranked ticket(s) listed in evidence first."
+        next_action = "Confirm the top-ranked ticket with the assigned engineer and dispatch accordingly."
+    elif "get_equipment_history" in tool_names_called:
+        recommendation = "Recent alarm/maintenance history for the requested tool is listed in evidence; look for recurring codes as the likely cause."
+        next_action = "Have an engineer review the alarm history for recurring patterns before further troubleshooting."
+    elif "search_knowledge" in tool_names_called or "search_history" in tool_names_called:
+        recommendation = "Related historical cases and/or knowledge-base excerpts are listed in evidence for comparison."
+        next_action = "Cross-check the current issue against the retrieved cases/guides before proceeding."
+    else:
+        recommendation = "Open tickets are listed in evidence; no further ranking or history lookup was requested."
+        next_action = "Review the listed tickets and escalate as appropriate."
+
+    assumptions = [
+        "Generated by offline demo mode (ANTHROPIC_API_KEY not set): tool selection is "
+        "rule-based and this recommendation is templated from real tool results, not live "
+        "Claude reasoning.",
+    ]
+    if errors:
+        assumptions.append(f"These tool calls failed and were skipped: {', '.join(errors)}.")
+    if not evidence:
+        assumptions.append("No evidence records were available from the tool calls made.")
+
+    answer = {
+        "recommendation": recommendation,
+        "evidence": evidence,
+        "assumptions": assumptions,
+        "confidence": "low",
+        "next_action": next_action,
+        "followup_note": None,
+    }
+
+    if any(w in lower for w in _FOLLOWUP_WORDS):
+        ticket_evidence = next((e for e in evidence if e["source"] == "ticket-service"), None)
+        if ticket_evidence:
+            answer["followup_note"] = {
+                "ticket_id": ticket_evidence["record_id"],
+                "summary": f"Draft follow-up for {ticket_evidence['record_id']} generated in offline demo mode.",
+                "root_cause": "Not determined by offline demo mode; requires engineer review.",
+                "next_action": next_action,
+            }
+            answer["assumptions"].append(
+                "Follow-up note is a demo-mode placeholder; an engineer must confirm the root cause before saving."
+            )
+
+    return answer
+
+
+def _extract_user_query(prompt: str) -> str:
+    marker = "User question: "
+    if prompt.startswith(marker):
+        return prompt[len(marker):].split("\n\nTool results:", 1)[0]
+    return prompt
+
+
+def _extract_results_text(prompt: str) -> str:
+    marker = "\n\nTool results:\n"
+    idx = prompt.find(marker)
+    return prompt[idx + len(marker):] if idx != -1 else ""
+
+
+class OfflineResponder:
+    """Deterministic, rule-based stand-in for the Anthropic client, used only when
+    ANTHROPIC_API_KEY is not set (see app/main.py's bootstrap). Implements the same
+    duck-typed `.messages.create(**kwargs)` interface app/loop.py expects, so the entire
+    plan->execute->synthesise flow (including grounding, injection scanning, and audit
+    logging) runs completely unmodified — only the source of the two/three LLM-shaped
+    answers changes. See spec §6.6."""
+
+    @property
+    def messages(self):
+        return self
+
+    def create(self, **kwargs):
+        system = kwargs.get("system", "")
+
+        if "tools" in kwargs:
+            query = kwargs["messages"][0]["content"]
+            planned = _plan_tools(query)
+            blocks = [
+                _ToolUseBlock(name=name, input=input_, id=f"offline_{i}")
+                for i, (name, input_) in enumerate(planned)
+            ]
+            return _Response(content=blocks)
+
+        prompt = kwargs["messages"][0]["content"]
+        user_query = _extract_user_query(prompt)
+        tool_calls = _parse_tool_results_text(_extract_results_text(prompt))
+        answer = _build_answer(user_query, tool_calls)
+
+        if system == REVISION_SYSTEM_PROMPT:
+            # Not normally reached: the synthesis branch below always reports
+            # sufficient=True, so app/loop.py never triggers a revision round in
+            # offline mode. Handled anyway for robustness — same answer, unwrapped
+            # per the revision schema.
+            return _Response(content=[_TextBlock(text=json.dumps(answer))])
+
+        payload = {"answer": answer, "sufficient": True, "additional_tool_request": None}
+        return _Response(content=[_TextBlock(text=json.dumps(payload))])
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run (from `services/agent-orchestrator/`): `python -m pytest tests/test_offline_responder.py -v`
+Expected: PASS — 10 passed.
+
+- [ ] **Step 5: Wire into `app/main.py`'s bootstrap**
+
+In `services/agent-orchestrator/app/main.py`, add the import:
+
+```python
+from app.offline_responder import OfflineResponder
+```
+
+Change the module-level `app = create_app(...)` call's `anthropic_client` argument from:
+
+```python
+    anthropic_client=anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "")),
+```
+
+to:
+
+```python
+    anthropic_client=(
+        anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        if os.environ.get("ANTHROPIC_API_KEY")
+        else OfflineResponder()
+    ),
+```
+
+No other line in `app/main.py` changes. `create_app`'s signature, the `/chat` handler, and
+every other function are untouched — this confirms the claim in spec §6.6 that the fallback
+is a one-conditional change.
+
+- [ ] **Step 6: Add a bootstrap-level test**
+
+Add to `services/agent-orchestrator/tests/test_main.py` (append, don't replace the file):
+
+```python
+def test_bootstrap_uses_offline_responder_when_api_key_missing(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    import importlib
+    import app.main as main_module
+    importlib.reload(main_module)
+    from app.offline_responder import OfflineResponder
+    assert isinstance(main_module.app.state.anthropic_client_for_test, OfflineResponder) if hasattr(main_module.app.state, "anthropic_client_for_test") else True
+```
+
+Note to implementer: the assertion above is deliberately soft (`if hasattr(...) else True`)
+because `create_app` does not currently expose its constructed `anthropic_client` on
+`app.state` for introspection. If you want a real, non-trivial assertion here rather than
+this soft placeholder, either (a) add `app.state.anthropic_client_for_test = anthropic_client`
+inside `create_app` purely for testability, and tighten this test to a real assertion, or
+(b) instead write a narrower unit test that directly calls the same conditional expression
+`app/main.py`'s bootstrap uses (extract it as a tiny `_build_anthropic_client()` helper
+function in `app/main.py` that the module-level `app = create_app(...)` calls, and unit-test
+that helper directly with `monkeypatch.setenv`/`monkeypatch.delenv`). Option (b) is cleaner
+and preferred — use your judgment, but do not leave the soft placeholder as the final test if
+you choose to add the helper function, since an always-true assertion provides no real
+coverage. Report which option you took in your self-review.
+
+- [ ] **Step 7: Run the full agent-orchestrator suite**
+
+Run: `python -m pytest tests/ -v`
+Expected: PASS — all prior tests plus the new `test_offline_responder.py` (10 tests) and
+the new bootstrap test, all green, no warnings.
+
+- [ ] **Step 8: Add a short README note**
+
+In `README.md`'s "Prerequisites" or "Setup" section, add 2-3 sentences stating: an
+`ANTHROPIC_API_KEY` is recommended for full live-Claude behaviour, but if one isn't set the
+system automatically falls back to a deterministic, rule-based offline responder so the
+full demo (UI, all services, the complete plan→execute→synthesise flow) still runs with
+zero setup — every such answer is clearly labeled `confidence: "low"` with an assumption
+noting it wasn't generated by live Claude. Point to spec §6.6 for the full rationale.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add services/agent-orchestrator/app/offline_responder.py services/agent-orchestrator/app/main.py \
+        services/agent-orchestrator/tests/test_offline_responder.py services/agent-orchestrator/tests/test_main.py \
+        README.md
+git commit -m "feat(agent-orchestrator): add rule-based offline fallback for missing ANTHROPIC_API_KEY"
+```
+
+---
+
 ## Self-Review
 
 **Spec coverage:** Every numbered item in the design spec's §12 deliverables table
