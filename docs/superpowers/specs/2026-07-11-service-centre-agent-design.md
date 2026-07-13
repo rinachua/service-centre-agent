@@ -68,6 +68,24 @@ All inter-service calls are synchronous REST (`httpx`) over the Compose network.
 orchestrator is the only service that talks to Claude and the only service the UI talks
 to — other services are never called directly by the client, and never call each other.
 
+**Agentic AI components, named explicitly.** This is an agentic AI system, not a chatbot
+wrapped around an LLM: `agent-orchestrator` is the agent, and it decomposes into the
+standard planner/act/reason/verify roles, each mapped to a concrete piece of code below
+rather than left implicit.
+
+| Agentic role | What plays that role | Where it lives |
+|---|---|---|
+| **Perception (input)** | The static chat UI's `POST /chat` request — a natural-language user query, no structure required. | `agent-orchestrator` `/chat` endpoint (§6.4) |
+| **Planner** | One Claude call (cheap model) that reads the query and the tool schema, and decides which tool(s) to invoke — never sees results before deciding, never free-texts. | `run_agent_loop`'s plan phase (§6.1) |
+| **Tools / actions** | The only way the agent touches data — never direct DB access. Four distinct capabilities: read tickets, read equipment/alarm history, retrieve knowledge-base text (RAG), and get a deterministic priority score. | `ticket-service`, `equipment-history-service`, `knowledge-service`, `recommendation-service` (§4) |
+| **Executor** | Deterministic router that turns the planner's tool requests into real REST calls, with timeout/retry/error-containment — no LLM involved in this step. | `ToolExecutor` (§4.5) |
+| **Reasoner / synthesiser** | One Claude call (full model) that turns raw tool results into the structured final answer — recommendation, evidence, assumptions, confidence, next action. | `run_agent_loop`'s synthesise phase (§6.1, §6.2) |
+| **Self-critique / recovery** | The synthesiser judges its own evidence and can request exactly one more planner→executor→synthesiser round if insufficient — capped, not open-ended. | The "optional single revision" step (§6.1) |
+| **Verifier (grounding)** | Checks every cited `record_id` in the final answer against IDs actually returned by tool calls that session; flags anything unverifiable rather than trusting it. | `verify_evidence` / `extract_known_ids` (§6.3) |
+| **Memory (per-request, not conversational)** | Persists the full tool-call trace, injection flags, and final answer for later audit/replay. Each `/chat` call is independent — there is no multi-turn conversation memory across requests. | `audit_log` SQLite table, `GET /audit/{request_id}` (§7) |
+| **Action gate (human-in-the-loop)** | The agent only ever *drafts* a follow-up note; nothing is written to `ticket-service` without an explicit, separate human action. | UI "Save follow-up" button → `POST /tickets/{ticket_id}/followups` (§6.4) |
+| **Fallback planner/reasoner** | Deterministic, rule-based stand-in for the planner and synthesiser roles above when no LLM is available — same roles, same flow, different implementation. | `OfflineResponder` (§6.6) |
+
 ### 3.1 Why this shape (vs. alternatives considered)
 
 | Approach | Description | Pros | Cons | Decision |
