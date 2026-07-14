@@ -13,7 +13,13 @@ def create_app(docs_path: Path) -> FastAPI:
     app = FastAPI(title="knowledge-service")
     app.add_middleware(RequestIDMiddleware)
     documents = load_documents(docs_path)
-    index = TfidfIndex({doc_id: doc["body"] for doc_id, doc in documents.items()})
+    # Index title + body, not body alone: otherwise a query matching only words that
+    # appear in a doc's title (e.g. "troubleshooting" in a title like "... Troubleshooting
+    # Guide") scores 0 against every document, since the title is stripped out of `body`
+    # by load_documents() and would never be indexed at all.
+    index = TfidfIndex(
+        {doc_id: f"{doc['title']}\n{doc['body']}" for doc_id, doc in documents.items()}
+    )
 
     @app.get("/health")
     def health():

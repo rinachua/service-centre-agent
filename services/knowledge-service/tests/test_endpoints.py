@@ -13,6 +13,22 @@ def test_search_endpoint_returns_results(tmp_path):
     assert "score" in body[0]
 
 
+def test_search_endpoint_matches_title_only_term(tmp_path):
+    """A query matching a word that appears only in the doc's title (not its body)
+    must still return that doc — regression test for the title-indexing fix."""
+    (tmp_path / "a.md").write_text(
+        "# Etch Chamber Troubleshooting Guide\n\nRF match network inspection steps."
+    )
+    (tmp_path / "b.md").write_text("# Unrelated\n\nWet clean particle count procedures.")
+    app = create_app(docs_path=tmp_path)
+    client = TestClient(app)
+    resp = client.get("/search", params={"q": "troubleshooting", "top_k": 5})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) >= 1
+    assert body[0]["doc_id"] == "DOC-001"
+
+
 def test_get_document_by_id(tmp_path):
     (tmp_path / "a.md").write_text("# Doc\n\nBody text.")
     app = create_app(docs_path=tmp_path)
