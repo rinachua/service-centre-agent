@@ -42,6 +42,10 @@ def create_app(
 
     @app.get("/health")
     def health():
+        try:
+            audit_conn.execute("SELECT 1")
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"audit database unavailable: {exc}") from exc
         return {"status": "ok"}
 
     @app.post("/chat")

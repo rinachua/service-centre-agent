@@ -1,8 +1,17 @@
-"""GENERATED FILE — do not edit directly.
+"""Canonical source for the shared structured-logging middleware used by all 5
+services (ticket-service, equipment-history-service, knowledge-service,
+recommendation-service, agent-orchestrator).
 
-Source of truth: common/logging_middleware.py at the repo root. Edit that file,
-then run `python3 scripts/sync-common.py` to regenerate this copy (and the other
-4 services' copies) from it.
+Do not hand-edit the copies inside services/*/app/logging_middleware.py — those are
+generated. Edit this file, then run scripts/sync-common.sh to regenerate them.
+
+Why a sync script instead of a shared pip package or Docker-level copy: each service
+builds its own Docker image from its own isolated build context (services/<name>) and
+is meant to stay independently deployable, with no shared runtime dependency on an
+internal library's version. A generated copy gives one real source of truth to edit
+without introducing that coupling, and without breaking each service's independent
+local venv + pytest workflow (the file still physically exists where `from
+app.logging_middleware import ...` expects it).
 """
 
 import json

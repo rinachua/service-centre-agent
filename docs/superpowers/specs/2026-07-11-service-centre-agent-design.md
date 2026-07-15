@@ -485,7 +485,20 @@ Rejected for this demo; the correct lever to reach for once real concurrent prod
 load exists, not before.
 
 - **Knowledge retrieval**: TF-IDF is adequate for 3 documents; a real deployment with
-  hundreds of SOPs would need a proper vector store and chunking strategy.
+  hundreds of SOPs would need a proper vector store and chunking strategy. This is a
+  trade-off, not a free upgrade. Semantic search would fix TF-IDF's actual blind spot —
+  no stemming or synonym matching, so a query for "troubleshoot" won't match
+  "troubleshooting" — but costs: (1) an external embedding-API dependency (Voyage/
+  OpenAI/Cohere/local model), which breaks the zero-setup, works-fully-offline property
+  the rest of this system deliberately preserves (§6.6); (2) real vector-DB
+  infrastructure (Pinecone/Weaviate/pgvector/etc.), unjustified at a 3-document corpus;
+  (3) reduced explainability — a TF-IDF match is traceable to the exact shared words
+  and their weights, an embedding-similarity match is not, which cuts against this
+  system's audit/evidence-grounding theme (§6.3); and (4) a real risk of regressing on
+  exact technical-identifier matching (alarm codes like `RF-OVR-REFL`, tool IDs like
+  `ETCH-07`), which TF-IDF matches precisely and embeddings can blur in favour of
+  general semantic closeness. Worth adopting once corpus size and paraphrase-tolerance
+  needs justify it — not before.
 - **Recurrence detection**: currently keyword/substring matching in
   recommendation-service; a production version would want a proper similarity model.
 - **Audit storage**: SQLite is fine for a demo; production would want an append-only

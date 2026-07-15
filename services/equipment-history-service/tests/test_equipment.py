@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from app.main import create_app
 from fastapi.testclient import TestClient
@@ -16,6 +17,19 @@ def test_health(tmp_path):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+def test_health_returns_503_when_database_unavailable(tmp_path):
+    """/health must reflect a genuinely broken DB connection, not just process
+    liveness — regression test for the health-check-always-returns-ok gap."""
+    broken_conn = MagicMock()
+    broken_conn.execute.side_effect = Exception("database is locked")
+    with patch("app.main.connect", return_value=broken_conn), patch("app.main.seed_if_empty"):
+        app = create_app(db_path=str(tmp_path / "test.db"), seed_path=SEED_PATH)
+        client = TestClient(app)
+        resp = client.get("/health")
+    assert resp.status_code == 503
+    assert "database unavailable" in resp.json()["detail"]
 
 
 def test_list_assets_returns_at_least_five(tmp_path):

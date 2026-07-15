@@ -19,6 +19,10 @@ def create_app(db_path: str, seed_path: Path) -> FastAPI:
 
     @app.get("/health")
     def health():
+        try:
+            conn.execute("SELECT 1")
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
         return {"status": "ok"}
 
     @app.get("/tickets", response_model=list[Ticket])

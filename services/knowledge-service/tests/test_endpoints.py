@@ -2,6 +2,24 @@ from app.main import create_app
 from fastapi.testclient import TestClient
 
 
+def test_health_returns_ok_when_documents_loaded(tmp_path):
+    (tmp_path / "a.md").write_text("# Doc\n\nBody text.")
+    app = create_app(docs_path=tmp_path)
+    client = TestClient(app)
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_health_returns_503_when_no_documents_loaded(tmp_path):
+    """/health must reflect that the search index has nothing to search, not just
+    process liveness — regression test for the health-check-always-returns-ok gap."""
+    app = create_app(docs_path=tmp_path)  # empty dir, no .md files
+    client = TestClient(app)
+    resp = client.get("/health")
+    assert resp.status_code == 503
+
+
 def test_search_endpoint_returns_results(tmp_path):
     (tmp_path / "a.md").write_text("# RF Guide\n\nRF generator troubleshooting.")
     app = create_app(docs_path=tmp_path)

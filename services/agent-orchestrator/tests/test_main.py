@@ -35,6 +35,20 @@ def test_health(tmp_path):
     assert resp.status_code == 200
 
 
+def test_health_returns_503_when_audit_database_unavailable(tmp_path):
+    """/health must reflect a genuinely broken audit DB connection, not just process
+    liveness — regression test for the health-check-always-returns-ok gap."""
+    from unittest.mock import MagicMock, patch
+
+    broken_conn = MagicMock()
+    broken_conn.execute.side_effect = Exception("database is locked")
+    with patch("app.audit.connect", return_value=broken_conn):
+        client = _build_client(tmp_path, FakeAnthropicClient([]))
+        resp = client.get("/health")
+    assert resp.status_code == 503
+    assert "audit database unavailable" in resp.json()["detail"]
+
+
 @respx.mock
 def test_chat_endpoint_returns_structured_answer_and_persists_audit(tmp_path):
     plan_response = FakeResponse(content=[])

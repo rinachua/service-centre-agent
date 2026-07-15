@@ -23,6 +23,8 @@ def create_app(docs_path: Path) -> FastAPI:
 
     @app.get("/health")
     def health():
+        if not documents:
+            raise HTTPException(status_code=503, detail="no documents loaded")
         return {"status": "ok"}
 
     @app.get("/search")

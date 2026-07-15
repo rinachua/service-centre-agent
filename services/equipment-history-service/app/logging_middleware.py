@@ -1,3 +1,10 @@
+"""GENERATED FILE — do not edit directly.
+
+Source of truth: common/logging_middleware.py at the repo root. Edit that file,
+then run `python3 scripts/sync-common.py` to regenerate this copy (and the other
+4 services' copies) from it.
+"""
+
 import json
 import logging
 import sys
@@ -5,7 +12,6 @@ import time
 import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware
-
 
 def configure_logging(service_name: str) -> None:
     handler = logging.StreamHandler(sys.stdout)
