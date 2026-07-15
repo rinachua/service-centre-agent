@@ -3,7 +3,7 @@ from pathlib import Path
 
 import anthropic
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -11,7 +11,12 @@ from app import audit as audit_module
 from app.logging_middleware import RequestIDMiddleware, configure_logging
 from app.loop import run_agent_loop
 from app.offline_responder import OfflineResponder
-from app.tools import ToolExecutor
+from app.tools import ServiceError, ToolExecutor
+
+# RBAC assumptions stub (spec §9.3) — caller-asserted, unauthenticated. See
+# app/loop.py's _ROLE_FRAMING for exactly what this does and does not change.
+_KNOWN_ROLES = {"engineer", "manager"}
+_DEFAULT_ROLE = "engineer"
 
 
 class ChatRequest(BaseModel):
@@ -49,8 +54,15 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/chat")
-    def chat(body: ChatRequest):
+    def chat(body: ChatRequest, x_user_role: str | None = Header(default=None)):
         request_id = audit_module.new_request_id()
+        # Caller-asserted, unauthenticated: normalise anything unrecognised to the
+        # default rather than erroring — this is a framing hint, not access control,
+        # so an unknown/absent header is not a failure case. See _ROLE_FRAMING in
+        # app/loop.py for what a role does (and does not) change.
+        user_role = (x_user_role or "").strip().lower()
+        if user_role not in _KNOWN_ROLES:
+            user_role = _DEFAULT_ROLE
         executor = ToolExecutor(
             ticket_url=ticket_url, equipment_url=equipment_url,
             knowledge_url=knowledge_url, recommendation_url=recommendation_url,
@@ -59,6 +71,7 @@ def create_app(
         try:
             answer, trace = run_agent_loop(
                 anthropic_client, planner_model, synthesis_model, body.query, executor,
+                user_role=user_role,
             )
         except anthropic.APIError as exc:
             raise HTTPException(status_code=502, detail=f"LLM provider error: {exc}") from exc
@@ -67,6 +80,7 @@ def create_app(
         audit_module.record(
             audit_conn, request_id, body.query, trace.tool_calls,
             trace.injection_flags, answer_dict,
+            schema_validation_failures=trace.schema_validation_failures,
         )
         return {"request_id": request_id, "answer": answer_dict}
 
@@ -77,10 +91,56 @@ def create_app(
             raise HTTPException(status_code=404, detail="Not found")
         return entry
 
+    @app.get("/audit")
+    def list_audit(limit: int = 20):
+        return audit_module.list_recent(audit_conn, limit=limit)
+
+    # Dashboard data endpoints (stretch goal): the browser only ever talks to
+    # agent-orchestrator (same pattern as /chat and /tickets/{id}/followups above),
+    # never directly to the other 4 services — those have no CORS headers configured
+    # since they're only ever meant to be called server-to-server. These proxy/reuse
+    # existing server-to-server calls so the dashboard can stay same-origin.
+    @app.get("/dashboard/tickets")
+    def dashboard_tickets(status: str | None = None):
+        try:
+            with httpx.Client(timeout=3.0, trust_env=False) as client:
+                params = {"status": status} if status else {}
+                resp = client.get(f"{ticket_url}/tickets", params=params)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"ticket-service error: {exc}") from exc
+
+    @app.get("/dashboard/assets")
+    def dashboard_assets():
+        try:
+            with httpx.Client(timeout=3.0, trust_env=False) as client:
+                resp = client.get(f"{equipment_url}/assets")
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"equipment-history-service error: {exc}") from exc
+
+    @app.get("/dashboard/priority")
+    def dashboard_priority():
+        # Reuses the same compound score_priority tool the agent itself calls
+        # (app/tools.py) — fetches open tickets + their history server-side, then
+        # posts to recommendation-service for ranking. Not routed through /chat: no
+        # LLM call involved, this is a direct data-fetch for the dashboard view.
+        executor = ToolExecutor(
+            ticket_url=ticket_url, equipment_url=equipment_url,
+            knowledge_url=knowledge_url, recommendation_url=recommendation_url,
+            request_id=audit_module.new_request_id(),
+        )
+        try:
+            return executor.execute("score_priority", {})
+        except ServiceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     @app.post("/tickets/{ticket_id}/followups", status_code=201)
     def save_followup(ticket_id: str, body: FollowupCreateRequest):
         try:
-            with httpx.Client(timeout=3.0) as client:
+            with httpx.Client(timeout=3.0, trust_env=False) as client:
                 resp = client.post(f"{ticket_url}/tickets/{ticket_id}/followups", json=body.model_dump())
                 resp.raise_for_status()
                 return resp.json()

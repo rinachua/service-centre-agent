@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Service Centre Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/dashboard.css" />
+</head>
+<body>
+  <div id="dashboard">
+    <div class="dashboard-header">
+      <h1>Service Centre Dashboard</h1>
+      <a href="/index.html">&larr; Back to chat</a>
+    </div>
+
+    <section>
+      <h2>Ticket priority</h2>
+      <p class="section-note">Deterministic priority score — same tool the agent calls for prioritisation questions.</p>
+      <div id="priority-table" class="table-container">Loading…</div>
+    </section>
+
+    <section>
+      <h2>Tool status</h2>
+      <div id="assets-table" class="table-container">Loading…</div>
+    </section>
+
+    <section>
+      <h2>Agent audit trail</h2>
+      <p class="section-note">Most recent 20 requests to /chat.</p>
+      <div id="audit-table" class="table-container">Loading…</div>
+    </section>
+  </div>
+  <script src="/dashboard.js"></script>
+</body>
+</html>

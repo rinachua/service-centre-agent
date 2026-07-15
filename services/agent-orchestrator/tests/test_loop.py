@@ -1,27 +1,14 @@
 import json
 
 from app.loop import run_agent_loop
-from app.tools import ServiceError
 
 from tests.fakes import (
     FakeAnthropicClient,
     FakeResponse,
     FakeTextBlock,
+    FakeToolExecutor,
     FakeToolUseBlock,
 )
-
-
-class FakeToolExecutor:
-    def __init__(self, results=None, error_on=None):
-        self.results = results or {}
-        self.error_on = error_on or set()
-        self.calls = []
-
-    def execute(self, tool_name, tool_input):
-        self.calls.append((tool_name, tool_input))
-        if tool_name in self.error_on:
-            raise ServiceError(tool_name, "simulated failure")
-        return self.results.get(tool_name, {})
 
 
 def _plan_response(*blocks):
@@ -160,6 +147,10 @@ def test_falls_back_when_synthesis_answer_is_not_valid_json():
 
     assert "Fallback triggered" in answer.assumptions[0]
     assert len(client.calls) == 2
+    assert trace.schema_validation_failures == [
+        {"stage": "synthesis", "reason": "response was not valid JSON"}
+    ]
+    assert any("failed schema validation at the synthesis stage" in a for a in answer.assumptions)
 
 
 def test_falls_back_when_revision_answer_is_not_valid_json():
@@ -185,6 +176,51 @@ def test_falls_back_when_revision_answer_is_not_valid_json():
 
     assert "Fallback triggered" in answer.assumptions[0]
     assert len(client.calls) == 3
+    assert trace.schema_validation_failures == [
+        {"stage": "revision", "reason": "response was not valid JSON"}
+    ]
+
+
+def test_synthesis_system_prompt_is_framed_for_manager_role_when_requested():
+    plan = _plan_response(FakeToolUseBlock(name="get_tickets", input={"status": "open"}, id="tu_1"))
+    synthesis = _text_response({
+        "answer": {
+            "recommendation": "Prioritise TCK-002.", "evidence": [], "assumptions": [],
+            "confidence": "low", "next_action": "Review.",
+        },
+        "sufficient": True, "additional_tool_request": None,
+    })
+    client = FakeAnthropicClient([plan, synthesis])
+    executor = FakeToolExecutor(results={"get_tickets": []})
+
+    run_agent_loop(
+        client, "claude-haiku-4-5-20251001", "claude-sonnet-5", "prioritise tickets", executor,
+        user_role="manager",
+    )
+
+    synthesis_call = client.calls[1]
+    assert "Audience: a manager" in synthesis_call["system"]
+    assert "downtime, cost" in synthesis_call["system"]
+
+
+def test_synthesis_system_prompt_defaults_to_engineer_framing():
+    plan = _plan_response(FakeToolUseBlock(name="get_tickets", input={"status": "open"}, id="tu_1"))
+    synthesis = _text_response({
+        "answer": {
+            "recommendation": "Prioritise TCK-002.", "evidence": [], "assumptions": [],
+            "confidence": "low", "next_action": "Review.",
+        },
+        "sufficient": True, "additional_tool_request": None,
+    })
+    client = FakeAnthropicClient([plan, synthesis])
+    executor = FakeToolExecutor(results={"get_tickets": []})
+
+    run_agent_loop(
+        client, "claude-haiku-4-5-20251001", "claude-sonnet-5", "prioritise tickets", executor,
+    )
+
+    synthesis_call = client.calls[1]
+    assert "Audience: an engineer" in synthesis_call["system"]
 
 
 def test_flags_injection_attempt_in_planned_tool_input():

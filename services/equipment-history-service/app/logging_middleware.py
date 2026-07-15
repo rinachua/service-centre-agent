@@ -13,6 +13,7 @@ import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware
 
+
 def configure_logging(service_name: str) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter("%(message)s"))

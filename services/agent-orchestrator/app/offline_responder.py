@@ -234,7 +234,10 @@ class OfflineResponder:
         tool_calls = _parse_tool_results_text(_extract_results_text(prompt))
         answer = _build_answer(user_query, tool_calls)
 
-        if system == REVISION_SYSTEM_PROMPT:
+        # startswith, not ==: run_agent_loop appends a role-framing suffix to the base
+        # system prompt (spec §9.3's RBAC assumptions stub), so the exact string no
+        # longer matches once a role other than the default is in play.
+        if system.startswith(REVISION_SYSTEM_PROMPT):
             # Not normally reached: the synthesis branch below always reports
             # sufficient=True, so app/loop.py never triggers a revision round in
             # offline mode. Handled anyway for robustness — same answer, unwrapped

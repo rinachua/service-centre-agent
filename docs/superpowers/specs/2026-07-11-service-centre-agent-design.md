@@ -28,10 +28,16 @@ Four example queries define the acceptance bar:
   satisfies the assessment brief's §8 constraint for a documented local/mock substitute.
 - "Microservices" run as separate Docker Compose containers, each independently
   runnable and testable.
-- Reasoning depth targets the assessment's "minimum functional scope, polished" bar —
-  stretch goals (RBAC enforcement, event-driven ingestion, human-in-the-loop *approval
-  workflow*, dashboard, eval harness) are documented as future work, not built, with one
-  partial exception noted in §6.4 (write actions are already human-gated by construction).
+- Reasoning depth targets the assessment's "minimum functional scope, polished" bar.
+  Stretch goals status: human-in-the-loop write approval is satisfied by construction,
+  not a separate build (§6.4); structured output schema validation is hardened, not
+  just present (`AgentAnswer`'s `model_validator` in `app/schemas.py`, and the audit
+  log's `schema_validation_failures` column); an evaluation harness
+  (`tests/test_evaluation_harness.py`) and a dashboard (`GET /dashboard/*`,
+  `static/dashboard.html`) are both built; RBAC is built as scoped, unenforced
+  *assumptions* (§9.3), not real access control — real RBAC enforcement remains future
+  work (§8). Event-driven ticket ingestion / scheduled refresh is the one stretch goal
+  deliberately not built, with reasoning in §9's trade-offs list.
 
 ## 3. Architecture overview
 
@@ -396,6 +402,11 @@ certain fields (e.g. cost/downtime rollups) in a response. This is called out as
 work rather than implemented, to keep the demo's scope aligned with "minimum functional
 scope, polished."
 
+Not to be confused with §9.3's RBAC *assumptions* stretch goal, which is real but
+narrower: a caller-asserted `X-User-Role` header that changes response *wording* only.
+It does not filter fields, does not authenticate the caller, and is not a substitute
+for the real auth/authz described above.
+
 ## 9. Trade-offs & future production considerations
 
 ### 9.1 LLM cost/latency, and when the live tool-use loop is the wrong choice
@@ -484,6 +495,34 @@ assessment brief: "do not spend excessive time on... infrastructure complexity")
 Rejected for this demo; the correct lever to reach for once real concurrent production
 load exists, not before.
 
+### 9.3 RBAC assumptions (engineer vs. manager) — stretch goal, scoped as assumptions
+
+There is no real authentication or authorization anywhere in this system — no login,
+no session, no verification of who is actually calling `/chat`. Read literally, the
+brief's stretch goal asks for "role-based access control **assumptions**," not a full
+RBAC implementation, so that's exactly what's built: a caller-asserted, unenforced
+framing hint, not access control.
+
+Mechanism: `/chat` accepts an optional `X-User-Role: engineer|manager` header
+(`app/main.py`). Anything absent or unrecognised silently normalises to `engineer` —
+an unknown role is not a failure case, since nothing is actually being authorized.
+The role is threaded through `run_agent_loop` into the synthesis and revision system
+prompts only (`app/loop.py`'s `_ROLE_FRAMING` / `_role_framed_system_prompt`), never
+into the planning call and never into which tools get called.
+
+What a role changes: **only the wording of the final recommendation.** A manager gets
+a synthesis prompt that asks the model to lead with downtime/cost/cross-tool trends
+rather than alarm codes and step-by-step procedure; an engineer gets the reverse. What
+a role does **not** change: every role fetches identical tool results, sees identical
+evidence, and gets an answer built from the identical audit-logged data. Nobody sees
+more or less data than anyone else — this is framing, not filtering.
+
+Explicitly out of scope: verifying the header is truthful (anyone can claim
+`X-User-Role: manager`), per-role data or tool restrictions, and a real login/session
+system. Building those would be the actual "RBAC enforcement" item already listed as
+deferred future work in §2 — this stub satisfies the brief's narrower "assumptions"
+wording without pretending to be real access control.
+
 - **Knowledge retrieval**: TF-IDF is adequate for 3 documents; a real deployment with
   hundreds of SOPs would need a proper vector store and chunking strategy. This is a
   trade-off, not a free upgrade. Semantic search would fix TF-IDF's actual blind spot —
@@ -506,6 +545,16 @@ load exists, not before.
   policy.
 - **Resilience**: no circuit breaker; at this scale a simple retry is sufficient, but a
   service with sustained failures should trip a breaker rather than retry indefinitely.
+- **Ticket ingestion**: `ticket-service` seeds once, from a static JSON file, at
+  container startup — there is no ongoing ingestion pipeline. A real deployment would
+  need either event-driven ingestion (a webhook endpoint + queue, updating as the
+  upstream CMMS/ticketing system changes) or a scheduled refresh (polling on an
+  interval). Deliberately not built for this demo: it's genuinely new infrastructure —
+  a queue/scheduler and a new service or module — solving a live-data-freshness problem
+  a static, seeded demo dataset doesn't have, which is exactly the kind of unnecessary
+  infrastructure complexity §8 of the assessment brief asks candidates to avoid (same
+  reasoning as §9.2's rejection of async request submission). The correct lever to
+  reach for once this is backed by a real, changing ticketing system, not before.
 
 ## 10. Repository structure
 

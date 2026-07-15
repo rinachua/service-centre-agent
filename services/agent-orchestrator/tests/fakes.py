@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from app.tools import ServiceError
+
 
 @dataclass
 class FakeTextBlock:
@@ -39,3 +41,20 @@ class FakeAnthropicClient:
     @property
     def messages(self):
         return _FakeMessages(self)
+
+
+class FakeToolExecutor:
+    """Duck-typed stand-in for app.tools.ToolExecutor — returns scripted results per
+    tool name instead of making real HTTP calls, and can simulate a downstream
+    service failure for named tools via `error_on`."""
+
+    def __init__(self, results=None, error_on=None):
+        self.results = results or {}
+        self.error_on = error_on or set()
+        self.calls: list[tuple] = []
+
+    def execute(self, tool_name, tool_input):
+        self.calls.append((tool_name, tool_input))
+        if tool_name in self.error_on:
+            raise ServiceError(tool_name, "simulated failure")
+        return self.results.get(tool_name, {})

@@ -2,9 +2,11 @@ import json
 
 from app.loop import (
     PLAN_SYSTEM_PROMPT,
+    REVISION_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
     AgentTrace,
     _build_synthesis_prompt,
+    _role_framed_system_prompt,
     run_agent_loop,
 )
 from app.offline_responder import (
@@ -107,6 +109,28 @@ def test_offline_responder_synthesis_call_returns_valid_answer_json():
     assert parsed["answer"]["confidence"] == "low"
     assert any(e["record_id"] == "TCK-002" for e in parsed["answer"]["evidence"])
     assert "offline demo mode" in parsed["answer"]["assumptions"][0]
+
+
+def test_offline_responder_still_recognises_revision_stage_with_role_framing_suffix():
+    """run_agent_loop appends a role-framing suffix to REVISION_SYSTEM_PROMPT (spec
+    §9.3's RBAC assumptions stub) — OfflineResponder's revision-stage detection must
+    match that suffixed string too, not just the bare constant. Regression test for
+    the exact-match -> startswith fix."""
+    responder = OfflineResponder()
+    trace = AgentTrace()
+    prompt = _build_synthesis_prompt("any question", trace)
+    framed_system = _role_framed_system_prompt(REVISION_SYSTEM_PROMPT, "manager")
+    assert framed_system != REVISION_SYSTEM_PROMPT  # confirms the suffix actually changed it
+
+    response = responder.messages.create(
+        model="offline", max_tokens=1500, system=framed_system,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = "".join(b.text for b in response.content if b.type == "text")
+    parsed = json.loads(text)
+    # Revision-shape response (unwrapped answer), not the synthesis-shape wrapper.
+    assert "answer" not in parsed
+    assert parsed["confidence"] == "low"
 
 
 def test_offline_responder_runs_through_full_run_agent_loop():

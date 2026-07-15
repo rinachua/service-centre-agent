@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     user_query TEXT NOT NULL,
     tool_calls TEXT NOT NULL,
     injection_flags TEXT NOT NULL,
+    schema_validation_failures TEXT NOT NULL DEFAULT '[]',
     final_answer TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -29,13 +30,18 @@ def new_request_id() -> str:
     return f"REQ-{uuid.uuid4().hex[:10]}"
 
 
-def record(conn, request_id, user_query, tool_calls, injection_flags, final_answer) -> None:
+def record(
+    conn, request_id, user_query, tool_calls, injection_flags, final_answer,
+    schema_validation_failures=None,
+) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO audit_log
-           (request_id, user_query, tool_calls, injection_flags, final_answer, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (request_id, user_query, tool_calls, injection_flags,
+            schema_validation_failures, final_answer, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             request_id, user_query, json.dumps(tool_calls), json.dumps(injection_flags),
+            json.dumps(schema_validation_failures or []),
             json.dumps(final_answer), datetime.now(timezone.utc).isoformat(),
         ),
     )
@@ -51,6 +57,31 @@ def get(conn, request_id: str):
         "user_query": row["user_query"],
         "tool_calls": json.loads(row["tool_calls"]),
         "injection_flags": json.loads(row["injection_flags"]),
+        "schema_validation_failures": json.loads(row["schema_validation_failures"]),
         "final_answer": json.loads(row["final_answer"]),
         "created_at": row["created_at"],
     }
+
+
+def list_recent(conn, limit: int = 20):
+    """Summary rows for the audit-trail dashboard — deliberately excludes the full
+    tool_calls/final_answer payloads (fetch a single entry via get() for that); a list
+    view only needs enough to identify and skim each request."""
+    rows = conn.execute(
+        """SELECT request_id, user_query, injection_flags, schema_validation_failures,
+                  final_answer, created_at
+           FROM audit_log ORDER BY created_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    entries = []
+    for row in rows:
+        final_answer = json.loads(row["final_answer"])
+        entries.append({
+            "request_id": row["request_id"],
+            "user_query": row["user_query"],
+            "confidence": final_answer.get("confidence"),
+            "had_injection_flags": bool(json.loads(row["injection_flags"])),
+            "had_schema_validation_failures": bool(json.loads(row["schema_validation_failures"])),
+            "created_at": row["created_at"],
+        })
+    return entries

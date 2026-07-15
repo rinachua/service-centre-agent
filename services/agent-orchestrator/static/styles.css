@@ -4,6 +4,17 @@ body {
   margin: 2rem auto;
   color: #1a1a1a;
 }
+.dashboard-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+.dashboard-header a {
+  font-size: 0.9rem;
+  color: #4338ca;
+  text-decoration: none;
+}
 #messages {
   display: flex;
   flex-direction: column;

@@ -7,7 +7,7 @@ from app.main import _build_anthropic_client, create_app
 from app.offline_responder import OfflineResponder
 from fastapi.testclient import TestClient
 
-from tests.fakes import FakeAnthropicClient, FakeResponse, FakeTextBlock
+from tests.fakes import FakeAnthropicClient, FakeResponse, FakeTextBlock, FakeToolUseBlock
 
 URLS = {
     "ticket_url": "http://ticket-service:8001",
@@ -47,6 +47,44 @@ def test_health_returns_503_when_audit_database_unavailable(tmp_path):
         resp = client.get("/health")
     assert resp.status_code == 503
     assert "audit database unavailable" in resp.json()["detail"]
+
+
+def _plan_and_synthesis(recommendation="x"):
+    plan = FakeResponse(content=[FakeToolUseBlock(name="get_tickets", input={}, id="tu_1")])
+    synthesis = FakeResponse(content=[FakeTextBlock(text=json.dumps({
+        "answer": {
+            "recommendation": recommendation, "evidence": [], "assumptions": [],
+            "confidence": "low", "next_action": "y",
+        },
+        "sufficient": True, "additional_tool_request": None,
+    }))])
+    return [plan, synthesis]
+
+
+def test_chat_passes_x_user_role_header_through_to_the_synthesis_prompt(tmp_path):
+    client_double = FakeAnthropicClient(_plan_and_synthesis())
+    client = _build_client(tmp_path, client_double)
+
+    resp = client.post(
+        "/chat", json={"query": "prioritise tickets"}, headers={"X-User-Role": "manager"},
+    )
+
+    assert resp.status_code == 200
+    synthesis_call = client_double.calls[1]
+    assert "Audience: a manager" in synthesis_call["system"]
+
+
+def test_chat_defaults_to_engineer_role_when_header_is_missing_or_unknown(tmp_path):
+    client_double = FakeAnthropicClient(_plan_and_synthesis())
+    client = _build_client(tmp_path, client_double)
+
+    resp = client.post(
+        "/chat", json={"query": "prioritise tickets"}, headers={"X-User-Role": "director"},
+    )
+
+    assert resp.status_code == 200
+    synthesis_call = client_double.calls[1]
+    assert "Audience: an engineer" in synthesis_call["system"]
 
 
 @respx.mock
@@ -114,6 +152,93 @@ def test_save_followup_returns_502_when_ticket_service_unreachable(tmp_path):
         "/tickets/TCK-001/followups",
         json={"summary": "s", "root_cause": "r", "next_action": "n"},
     )
+    assert resp.status_code == 502
+
+
+def test_list_audit_returns_empty_list_when_nothing_logged_yet(tmp_path):
+    test_client = _build_client(tmp_path, FakeAnthropicClient([]))
+    resp = test_client.get("/audit")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@respx.mock
+def test_list_audit_returns_recent_entries_after_a_chat_request(tmp_path):
+    respx.get("http://ticket-service:8001/tickets").mock(
+        return_value=httpx.Response(200, json=[{"ticket_id": "TCK-001", "tool_id": "ETCH-07"}])
+    )
+    fake_client = FakeAnthropicClient(_plan_and_synthesis("Prioritise TCK-002."))
+    test_client = _build_client(tmp_path, fake_client)
+    test_client.post("/chat", json={"query": "which tickets first?"})
+
+    resp = test_client.get("/audit?limit=5")
+    assert resp.status_code == 200
+    entries = resp.json()
+    assert len(entries) == 1
+    assert entries[0]["user_query"] == "which tickets first?"
+    assert entries[0]["confidence"] == "low"
+
+
+@respx.mock
+def test_dashboard_tickets_proxies_to_ticket_service(tmp_path):
+    respx.get("http://ticket-service:8001/tickets").mock(
+        return_value=httpx.Response(200, json=[{"ticket_id": "TCK-001", "status": "open"}])
+    )
+    test_client = _build_client(tmp_path, FakeAnthropicClient([]))
+    resp = test_client.get("/dashboard/tickets")
+    assert resp.status_code == 200
+    assert resp.json() == [{"ticket_id": "TCK-001", "status": "open"}]
+
+
+@respx.mock
+def test_dashboard_tickets_returns_502_when_ticket_service_unreachable(tmp_path):
+    respx.get("http://ticket-service:8001/tickets").mock(side_effect=httpx.ConnectError("refused"))
+    test_client = _build_client(tmp_path, FakeAnthropicClient([]))
+    resp = test_client.get("/dashboard/tickets")
+    assert resp.status_code == 502
+
+
+@respx.mock
+def test_dashboard_assets_proxies_to_equipment_history_service(tmp_path):
+    respx.get("http://equipment:8002/assets").mock(
+        return_value=httpx.Response(200, json=[{"tool_id": "ETCH-07", "status": "in_use"}])
+    )
+    test_client = _build_client(tmp_path, FakeAnthropicClient([]))
+    resp = test_client.get("/dashboard/assets")
+    assert resp.status_code == 200
+    assert resp.json() == [{"tool_id": "ETCH-07", "status": "in_use"}]
+
+
+@respx.mock
+def test_dashboard_priority_reuses_score_priority_tool(tmp_path):
+    respx.get("http://ticket-service:8001/tickets").mock(
+        return_value=httpx.Response(200, json=[{"ticket_id": "TCK-001", "tool_id": "ETCH-07"}])
+    )
+    respx.get("http://equipment:8002/assets/ETCH-07/history").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.post("http://recommendation:8004/priority-score").mock(
+        return_value=httpx.Response(200, json=[{"ticket_id": "TCK-001", "score": 0.5}])
+    )
+    test_client = _build_client(tmp_path, FakeAnthropicClient([]))
+    resp = test_client.get("/dashboard/priority")
+    assert resp.status_code == 200
+    assert resp.json() == [{"ticket_id": "TCK-001", "score": 0.5}]
+
+
+@respx.mock
+def test_dashboard_priority_returns_502_when_recommendation_service_unreachable(tmp_path):
+    respx.get("http://ticket-service:8001/tickets").mock(
+        return_value=httpx.Response(200, json=[{"ticket_id": "TCK-001", "tool_id": "ETCH-07"}])
+    )
+    respx.get("http://equipment:8002/assets/ETCH-07/history").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.post("http://recommendation:8004/priority-score").mock(
+        side_effect=httpx.ConnectError("refused")
+    )
+    test_client = _build_client(tmp_path, FakeAnthropicClient([]))
+    resp = test_client.get("/dashboard/priority")
     assert resp.status_code == 502
 
 
