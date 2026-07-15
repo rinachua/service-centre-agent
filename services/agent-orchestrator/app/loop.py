@@ -188,11 +188,24 @@ def _build_synthesis_prompt(user_query: str, trace: AgentTrace) -> str:
     return f"User question: {user_query}\n\nTool results:\n{results_text}"
 
 
-def _record_schema_failure(trace: AgentTrace, stage: str, reason: str) -> None:
+def _record_schema_failure(
+    trace: AgentTrace, stage: str, reason: str, raw_text: str = "", stop_reason: str = ""
+) -> None:
     """Schema/parse failures on the LLM's structured output were previously swallowed
     silently (`except Exception: return None`), with no visibility into *why* the
-    fallback fired. Log it and record it on the trace so it reaches the audit log."""
-    logger.warning("Synthesis schema validation failed at %s: %s", stage, reason)
+    fallback fired. Log it and record it on the trace so it reaches the audit log.
+
+    raw_text/stop_reason are logged (truncated) but NOT added to trace/audit — the
+    audit log is meant to be small, structured, and always JSON-safe, and a raw LLM
+    response is exactly the kind of unstructured/unbounded text that doesn't belong
+    there. `stop_reason` is the direct signal for a truncation-vs-malformed-output
+    diagnosis: `max_tokens` means the response was cut off mid-JSON (raise the token
+    cap), anything else means Claude produced complete but non-JSON text (a prompt
+    problem, not a length problem)."""
+    logger.warning(
+        "Synthesis schema validation failed at %s: %s (stop_reason=%s) raw_text=%r",
+        stage, reason, stop_reason or "unknown", raw_text[:500],
+    )
     trace.schema_validation_failures.append({"stage": stage, "reason": reason})
 
 
@@ -205,14 +218,15 @@ def _synthesize(client, model: str, user_query: str, trace: AgentTrace, user_rol
         messages=[{"role": "user", "content": prompt}],
     )
     text = "".join(b.text for b in response.content if b.type == "text")
+    stop_reason = getattr(response, "stop_reason", "")
     parsed = _try_parse_json(text)
     if parsed is None:
-        _record_schema_failure(trace, "synthesis", "response was not valid JSON")
+        _record_schema_failure(trace, "synthesis", "response was not valid JSON", text, stop_reason)
         return None, True, None
     try:
         answer = AgentAnswer(**parsed["answer"])
     except Exception as exc:
-        _record_schema_failure(trace, "synthesis", f"{type(exc).__name__}: {exc}")
+        _record_schema_failure(trace, "synthesis", f"{type(exc).__name__}: {exc}", text, stop_reason)
         return None, True, None
     return answer, bool(parsed.get("sufficient", True)), parsed.get("additional_tool_request")
 
@@ -226,14 +240,15 @@ def _synthesize_revision(client, model: str, user_query: str, trace: AgentTrace,
         messages=[{"role": "user", "content": prompt}],
     )
     text = "".join(b.text for b in response.content if b.type == "text")
+    stop_reason = getattr(response, "stop_reason", "")
     parsed = _try_parse_json(text)
     if parsed is None:
-        _record_schema_failure(trace, "revision", "response was not valid JSON")
+        _record_schema_failure(trace, "revision", "response was not valid JSON", text, stop_reason)
         return None
     try:
         return AgentAnswer(**parsed)
     except Exception as exc:
-        _record_schema_failure(trace, "revision", f"{type(exc).__name__}: {exc}")
+        _record_schema_failure(trace, "revision", f"{type(exc).__name__}: {exc}", text, stop_reason)
         return None
 
 

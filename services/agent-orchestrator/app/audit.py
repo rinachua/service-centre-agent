@@ -17,12 +17,40 @@ CREATE TABLE IF NOT EXISTS audit_log (
 """
 
 
+_EXPECTED_COLUMNS = {
+    "request_id": "TEXT",
+    "user_query": "TEXT NOT NULL",
+    "tool_calls": "TEXT NOT NULL",
+    "injection_flags": "TEXT NOT NULL",
+    "schema_validation_failures": "TEXT NOT NULL DEFAULT '[]'",
+    "final_answer": "TEXT NOT NULL",
+    "created_at": "TEXT NOT NULL",
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """CREATE TABLE IF NOT EXISTS only creates audit_log on a brand-new database — it
+    never patches an existing one. audit.db lives in a Docker named volume that
+    persists across image rebuilds, so any DB file created before a column was added
+    (e.g. schema_validation_failures, added for the schema-validation-hardening
+    stretch goal) is left with the old schema, and INSERTs referencing the new column
+    fail at runtime instead of at startup. Add any columns the on-disk table is
+    missing so schema changes are self-healing rather than a silent landmine."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")}
+    for column, definition in _EXPECTED_COLUMNS.items():
+        if column in existing:
+            continue
+        conn.execute(f"ALTER TABLE audit_log ADD COLUMN {column} {definition}")
+    conn.commit()
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     if db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 

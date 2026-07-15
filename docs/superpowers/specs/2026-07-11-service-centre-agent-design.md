@@ -175,10 +175,17 @@ match, not ML).
 
 The only service exposed to the user. Responsibilities:
 
-- Serves the static chat UI (`GET /`).
+- Serves the static chat UI (`GET /`) and the dashboard (`GET /dashboard.html`).
 - `POST /chat` — conversational endpoint, runs the bounded plan→execute→synthesise flow
-  (§6.1), returns the structured answer (§6.2).
+  (§6.1), returns the structured answer (§6.2). Accepts an optional `X-User-Role` header
+  (§9.3).
 - `GET /audit/{request_id}` — replay the full tool-call trace for a prior request.
+  `GET /audit?limit=` — summary rows for the most recent requests (dashboard list view).
+- `GET /dashboard/tickets`, `GET /dashboard/assets`, `GET /dashboard/priority` —
+  same-origin data endpoints backing the dashboard. The browser only ever talks to
+  `agent-orchestrator`; these proxy/reuse server-to-server calls to the other 4
+  services so none of them need CORS configuration (they're never called by a
+  client directly, only server-to-server — see §3's inter-service diagram).
 - Holds the Claude client (planner model + synthesis model; automatically substituted
   with the offline `OfflineResponder` fallback when `ANTHROPIC_API_KEY` is unset — §6.6),
   tool schema (mapped 1:1 to the REST endpoints above), system prompts, grounding checks,
@@ -235,6 +242,11 @@ exactly how the fallback answers the same two call sites.
    offline fallback always reports `sufficient: true`, so this step never fires when
    there's no API key — a deliberate scope reduction (§6.6) since the revision path is
    already fully covered by `test_loop.py`'s unit tests against the real contract.
+   `AgentTrace.revised` records in-process whether this path fired for a given
+   request (useful for debugging and as a hook for future audit-log extension), but
+   it is not currently persisted to the `audit_log` table by the `/chat` handler — the
+   audit trail (§7) does not yet show, after the fact, whether a given past request
+   took the revision path.
 
 This recovers most of a fully open loop's value (a wrong first plan can still be
 corrected once, e.g. escalate to knowledge-service if history alone didn't explain the
@@ -297,12 +309,24 @@ procedural.
 
 ### 6.5 Failure handling
 
-- Each downstream REST call: 3s timeout, 1 retry with backoff.
+- Each downstream REST call: 3s timeout, 1 retry on connection-level failure only — an
+  HTTP error status (4xx/5xx) is not retried, since it won't change on a second
+  attempt. Implemented once, as `request_with_retry()` (`app/tools.py`), and shared by
+  every downstream call in the service: `ToolExecutor`'s tool calls, and the
+  dashboard/follow-up-save endpoints (§4.5), which previously made one-shot calls with
+  no retry at all — the one inconsistency a prior review of this codebase caught and
+  closed, with a regression test proving a single transient failure now recovers
+  instead of surfacing a 502.
 - On repeated failure, the orchestrator records a synthetic "unavailable" result for
   that tool call and proceeds to the synthesis step anyway; the final answer's
   `assumptions` field records the gap explicitly (e.g. "equipment-history-service was
   unreachable; recommendation is based on ticket data only").
 - The orchestrator never lets a downstream failure become an unhandled 500 to the user.
+- `ToolExecutor.execute()` dispatches through a `_handlers` registry (one dict entry
+  per tool: name → bound method) rather than an if/elif chain — adding a future tool
+  #8 means one registry entry plus one `TOOL_DEFS` entry, not editing a growing
+  conditional. Not a scale-driven change (7 tools doesn't need it yet); done because
+  it was free to do while already touching the retry logic above.
 
 ### 6.6 LLM-unavailable fallback (brief §8 compliance)
 
@@ -391,6 +415,20 @@ that format fails a test immediately instead of silently breaking offline mode.
 - A `request_id` (UUID) is generated per `/chat` call and passed as a header on every
   downstream REST call, so log lines across services can be correlated by grepping one
   ID — a lightweight stand-in for distributed tracing.
+- **Audit-log schema is self-healing, not just created-once.** `CREATE TABLE IF NOT
+  EXISTS` only creates `audit_log` on a brand-new database — it silently does nothing
+  to a table that already exists with an older schema. Because `audit_log`'s SQLite
+  file lives in a Docker named volume that survives image rebuilds, a schema change
+  (e.g. the `schema_validation_failures` column added alongside the structured-output
+  hardening in §6.2) would otherwise crash every `INSERT` against a pre-existing
+  volume with `sqlite3.OperationalError: table audit_log has no column named ...` —
+  which is exactly what happened once, caught via a live `/chat` call against a
+  volume created before that column existed. `app/audit.py`'s `connect()` now runs a
+  small migration after table creation: `PRAGMA table_info(audit_log)` to see what
+  columns actually exist, then `ALTER TABLE ADD COLUMN` for anything missing. Not a
+  general migration framework — just enough to make the one failure mode that
+  actually occurred here impossible to hit again, with a regression test that
+  reproduces the exact error against a simulated pre-existing DB.
 
 ## 8. Security / access-control assumption
 
@@ -406,6 +444,16 @@ Not to be confused with §9.3's RBAC *assumptions* stretch goal, which is real b
 narrower: a caller-asserted `X-User-Role` header that changes response *wording* only.
 It does not filter fields, does not authenticate the caller, and is not a substitute
 for the real auth/authz described above.
+
+Of the future work above, the most concrete near-term step is backing the
+`X-User-Role` header with real authentication: signed JWTs carrying a role claim,
+verified by `agent-orchestrator` middleware, so a role is cryptographically asserted
+rather than trusted from an unauthenticated header. This is a direct extension of the
+§9.3 stub — no user store or login UI needed for a demo-scale version, just token
+issuance/verification with a shared signing secret — unlike the OIDC-gateway/mTLS
+picture above, which is real production infrastructure this demo doesn't need yet.
+See `README.md`'s "What the candidate would improve with more time" for this framed
+alongside the codebase's other concretely-next-buildable item (dependency pinning).
 
 ## 9. Trade-offs & future production considerations
 
@@ -538,8 +586,21 @@ wording without pretending to be real access control.
   `ETCH-07`), which TF-IDF matches precisely and embeddings can blur in favour of
   general semantic closeness. Worth adopting once corpus size and paraphrase-tolerance
   needs justify it — not before.
-- **Recurrence detection**: currently keyword/substring matching in
-  recommendation-service; a production version would want a proper similarity model.
+- **Recommendation scoring engine**: `recommendation-service` currently ranks tickets
+  with a hand-picked weighted formula (0.4×severity + 0.3×downtime + 0.2×recurrence +
+  0.1×age; §4.4), including keyword/substring matching for recurrence detection
+  specifically — transparent and fully auditable, but the weights were chosen, not
+  learned, and a fixed formula can't pick up on interactions between signals (e.g. two
+  moderate factors compounding into something more urgent than either alone). A
+  production version would swap this for a small, still-explainable ML model (e.g.
+  gradient-boosted trees over the same feature set) — or add an LLM-assisted scoring
+  step — trained on real historical outcomes: which tickets actually got escalated,
+  how fast, and what happened after. Unlike the other items in this list, this one is
+  genuinely blocked, not just unbuilt: there's no real historical outcome data to
+  train or evaluate against yet, only synthetic seed tickets, so building it now would
+  mean training on data that doesn't reflect anything real. See `README.md`'s "What
+  the candidate would improve with more time" for this framed alongside the two
+  actually-buildable-now items.
 - **Audit storage**: SQLite is fine for a demo; production would want an append-only
   store (e.g. a dedicated audit table in Postgres, or a log pipeline) with retention
   policy.
@@ -566,24 +627,51 @@ service-centre-agent/
   docs/
     architecture.md              (expanded version of this spec + diagrams, for submission)
     superpowers/specs/           (this file)
+  common/
+    logging_middleware.py        (canonical source, see below — do not hand-edit copies)
   services/
     ticket-service/
+      app/logging_middleware.py  (generated copy)
     equipment-history-service/
+      app/logging_middleware.py  (generated copy)
     knowledge-service/
+      app/logging_middleware.py  (generated copy)
     recommendation-service/
+      app/logging_middleware.py  (generated copy)
     agent-orchestrator/
-      static/                    (chat UI)
+      app/logging_middleware.py  (generated copy)
+      static/                    (chat UI + dashboard)
   data/
     seed/                        (synthetic JSON source data)
   scripts/
     seed_data.py
+    sync-common.py                (regenerates the 5 logging_middleware.py copies from common/;
+                                    --check mode fails CI on drift)
   tests/
     ticket-service/
     equipment-history-service/
     knowledge-service/
     recommendation-service/
-    agent-orchestrator/          (includes mocked tool-loop integration test)
+    agent-orchestrator/          (includes mocked tool-loop integration test,
+                                   test_evaluation_harness.py — behavioural assertions
+                                   against OfflineResponder, no API key needed)
 ```
+
+**Shared `logging_middleware.py`, deduplicated.** The structured-logging middleware
+(request ID, method, path, latency, status — §7) was byte-identical across all 5
+services. Rejected two more obvious fixes in favour of a third: a shared pip package
+would introduce a runtime version-coupling dependency between services meant to stay
+independently deployable; a Docker-build-context restructure (each service importing
+a sibling directory) would break each service's independent local venv + `pytest`
+workflow, since Docker build contexts are isolated per service by design. Instead,
+`common/logging_middleware.py` is the single edited source, and
+`scripts/sync-common.py` regenerates the 5 per-service copies — one real source of
+truth to edit, with the file still physically present wherever each service's
+`from app.logging_middleware import ...` and local test workflow expect it.
+`sync-common.py --check` exits non-zero if any copy has drifted from the canonical
+source, so a hand-edited copy can't silently diverge — designed to run as a CI gate
+(`.github/workflows/ci.yml` drafts this), not yet confirmed running in a live CI
+pipeline for this repo.
 
 ## 11. Testing strategy
 

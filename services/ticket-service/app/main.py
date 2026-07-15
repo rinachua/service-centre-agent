@@ -9,7 +9,6 @@ from app.db import connect, seed_if_empty
 from app.logging_middleware import RequestIDMiddleware, configure_logging
 from app.schemas import Followup, FollowupCreate, Ticket
 
-
 def create_app(db_path: str, seed_path: Path) -> FastAPI:
     configure_logging("ticket-service")
     app = FastAPI(title="ticket-service")

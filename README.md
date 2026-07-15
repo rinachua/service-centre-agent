@@ -46,11 +46,33 @@ curl -s -X POST http://localhost:8000/chat \
   -d '{"query": "Which open equipment tickets should I prioritise today and why?"}'
 ```
 
-Retrieve the full tool-call trace behind any answer:
+Optionally set `X-User-Role: manager` (or `engineer`, the default) on `/chat` to change
+how the answer is framed — downtime/cost/trend framing for a manager vs. alarm
+codes/part numbers/concrete steps for an engineer. This is a caller-asserted framing
+hint only, not real access control: every role sees the same tool results and
+evidence, only the recommendation's wording differs. See the design spec's §9.3 for
+what this stub does and does not cover.
+
+```bash
+curl -s -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -H "X-User-Role: manager" \
+  -d '{"query": "Which open equipment tickets should I prioritise today and why?"}'
+```
+
+Retrieve the full tool-call trace behind any answer, or list recent requests:
 
 ```bash
 curl -s http://localhost:8000/audit/<request_id>
+curl -s "http://localhost:8000/audit?limit=20"
 ```
+
+## Dashboard
+
+Open `http://localhost:8000/dashboard.html` for an at-a-glance view of priority-ranked
+open tickets, asset status, and the recent audit trail. The browser only ever talks to
+`agent-orchestrator` (same-origin); it proxies the ticket/equipment/recommendation
+calls server-to-server so the other 4 services never need CORS configuration.
 
 ## Model tiering and cost bound
 
@@ -88,6 +110,27 @@ for svc in ticket-service equipment-history-service knowledge-service recommenda
 done
 ```
 
+`agent-orchestrator/tests/test_evaluation_harness.py` is a small evaluation harness:
+black-box behavioural assertions (right tool called for a given query shape, evidence
+stays grounded in real record IDs, the agent degrades gracefully when a downstream
+service fails, prompt-injection content gets flagged) run against the deterministic
+`OfflineResponder` rather than pinning exact LLM output — free to run, no API key
+needed, and stable across model updates.
+
+## Querying the database directly
+
+Each service's SQLite file lives in a Docker named volume, not on the host. For ad hoc
+inspection:
+
+```bash
+docker compose exec ticket-service sqlite3 /app/data-local/tickets.db "SELECT * FROM tickets LIMIT 5;"
+docker compose exec equipment-history-service sqlite3 /app/data-local/equipment.db "SELECT * FROM history LIMIT 5;"
+docker compose exec agent-orchestrator sqlite3 /app/data-local/audit.db "SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 5;"
+```
+
+(`knowledge-service` and `recommendation-service` are stateless — no DB.) Prefer the
+REST APIs above for anything beyond one-off debugging, since services own their data.
+
 ## Example queries to try
 
 - "Which open equipment tickets should I prioritise today and why?"
@@ -98,26 +141,74 @@ done
 
 ## Known limitations and assumptions
 
-- No authentication/authorization is implemented; see the design spec's §8 "Security
-  / access-control assumption"
-  (`docs/superpowers/specs/2026-07-11-service-centre-agent-design.md`) for the
-  documented production assumption.
-- Knowledge retrieval is TF-IDF over 3 documents — adequate for this demo, not for a
-  production-scale document corpus (see the design spec's §9 "Trade-offs & future
-  production considerations").
+These are genuine gaps — things a real production launch would need regardless of
+scale, not scoping decisions:
+
+- No real authentication/authorization is implemented. The `X-User-Role` header (see
+  "Run everything" above) only changes response *framing*, never data access or tool
+  selection — it is a caller-asserted, unauthenticated hint, not enforcement. See the
+  design spec's §8 "Security / access-control assumption" and §9.3 "RBAC assumptions"
+  (`docs/superpowers/specs/2026-07-11-service-centre-agent-design.md`).
 - The agent can only draft follow-up notes; persisting one requires an explicit
   "Save follow-up" click in the UI (or a direct call to
   `POST /tickets/{ticket_id}/followups`) — this is a deliberate human-in-the-loop
   gate, not an oversight.
-- Dependency versions in each `requirements.txt` are floors (`>=`), not exact pins;
-  run `pip freeze > requirements.lock` per service if you need fully reproducible
-  builds.
+- Dependency versions in each `requirements.txt` are floors (`>=`), not exact pins.
+- `/health` on each service checks that its actual dependency is reachable (DB
+  connection, loaded document set), not just that the process is alive — but there is
+  still no separate liveness vs. readiness distinction (e.g. Kubernetes-style probes),
+  since Docker Compose's `healthcheck` only needs one signal here.
 
-## What I'd improve with more time
+## What the candidate would improve with more time
 
-- Replace TF-IDF with a real vector store for knowledge retrieval at scale.
-- Add a circuit breaker around downstream calls instead of a flat retry-once policy.
-- Implement the documented RBAC assumption (engineer vs. manager response shaping)
-  rather than leaving it as a production note.
-- Add an evaluation harness with a fixed set of test prompts and expected-behaviour
-  assertions (stretch goal from the assessment brief).
+The first two are buildable now, with no external precondition. The third is
+genuinely blocked on data this demo doesn't have — worth naming as the honest next
+step, not something to fake with more time alone:
+
+- **Back the `X-User-Role` framing stub with real authentication.** Issue signed JWTs
+  carrying a role claim and verify them in `agent-orchestrator` middleware, so a role
+  is cryptographically asserted rather than trusted from an unauthenticated header.
+  This is a direct extension of the RBAC-assumptions stub already built (spec §9.3),
+  not a new subsystem — no user store or login UI needed for a demo-scale version, just
+  token issuance/verification with a shared signing secret.
+- **Pin dependencies to exact versions** (`pip freeze > requirements.lock` per
+  service, or a lockfile-based tool) instead of the current `>=` floors, for fully
+  reproducible builds.
+- **Replace `recommendation-service`'s fixed-formula scoring with an ML model
+  engine.** `scoring.py` currently ranks tickets with a hand-picked weighted
+  formula (0.4×severity + 0.3×downtime + 0.2×recurrence + 0.1×age) — transparent and
+  fully auditable, but the weights were chosen, not learned, and it can't pick up on
+  interactions between signals a formula can't express (e.g. two moderate factors
+  compounding into something more urgent than either alone). A production version
+  would swap this for a small, still-explainable model (e.g. gradient-boosted trees
+  over the same feature set) — or add an LLM-assisted scoring step — trained on real
+  historical outcomes: which tickets actually got escalated, how fast, and what
+  happened after. This is the one item on this page that isn't just unbuilt but
+  actually blocked: there's no real historical outcome data to train or evaluate
+  against yet, only synthetic seed tickets, so building this now would mean training
+  on data that doesn't reflect anything real — worth flagging as the plan, not
+  something to force with more engineering time alone.
+
+## Deliberately not built (would be over-engineering at this scale)
+
+These were considered and explicitly scoped out — not because they're hard, but because 
+nothing in this system currently has the problem they'd solve. Building them now would be 
+solving a problem that doesn't exist yet, at the cost of real complexity (new services to run,
+new failure modes, new things to keep in sync):
+
+- **Vector database / semantic search for knowledge retrieval.** TF-IDF over 3
+  documents is an exact fit — an embedding pipeline, ANN index, and vector-DB
+  dependency would add real operational surface to solve a retrieval-quality problem
+  this corpus doesn't have. Worth revisiting once the document corpus grows large
+  enough that keyword overlap genuinely stops finding relevant docs (see the design
+  spec's §9 "Trade-offs & future production considerations").
+- **Circuit breaker around downstream service calls.** A flat retry-once policy is
+  proportionate for 5 services on one Docker network with no real concurrent load or
+  cascading-failure risk. A circuit breaker earns its complexity once there's traffic
+  volume where a genuinely degraded downstream service could get hammered by retries
+  — not before.
+- **Event-driven or scheduled ticket ingestion.** There is no external ticketing
+  system to ingest from yet; tickets are seeded or created directly via the API.
+  Building an ingestion pipeline now would be infrastructure for a system that
+  doesn't exist — revisit if/when a real upstream ticketing system needs to feed
+  this one. See the design spec's §9 for the full reasoning.

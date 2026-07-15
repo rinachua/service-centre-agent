@@ -11,7 +11,7 @@ from app import audit as audit_module
 from app.logging_middleware import RequestIDMiddleware, configure_logging
 from app.loop import run_agent_loop
 from app.offline_responder import OfflineResponder
-from app.tools import ServiceError, ToolExecutor
+from app.tools import ServiceError, ToolExecutor, request_with_retry
 
 # RBAC assumptions stub (spec §9.3) — caller-asserted, unauthenticated. See
 # app/loop.py's _ROLE_FRAMING for exactly what this does and does not change.
@@ -103,21 +103,15 @@ def create_app(
     @app.get("/dashboard/tickets")
     def dashboard_tickets(status: str | None = None):
         try:
-            with httpx.Client(timeout=3.0, trust_env=False) as client:
-                params = {"status": status} if status else {}
-                resp = client.get(f"{ticket_url}/tickets", params=params)
-                resp.raise_for_status()
-                return resp.json()
+            params = {"status": status} if status else {}
+            return request_with_retry("GET", f"{ticket_url}/tickets", params=params)
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"ticket-service error: {exc}") from exc
 
     @app.get("/dashboard/assets")
     def dashboard_assets():
         try:
-            with httpx.Client(timeout=3.0, trust_env=False) as client:
-                resp = client.get(f"{equipment_url}/assets")
-                resp.raise_for_status()
-                return resp.json()
+            return request_with_retry("GET", f"{equipment_url}/assets")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"equipment-history-service error: {exc}") from exc
 
@@ -140,10 +134,9 @@ def create_app(
     @app.post("/tickets/{ticket_id}/followups", status_code=201)
     def save_followup(ticket_id: str, body: FollowupCreateRequest):
         try:
-            with httpx.Client(timeout=3.0, trust_env=False) as client:
-                resp = client.post(f"{ticket_url}/tickets/{ticket_id}/followups", json=body.model_dump())
-                resp.raise_for_status()
-                return resp.json()
+            return request_with_retry(
+                "POST", f"{ticket_url}/tickets/{ticket_id}/followups", json_body=body.model_dump()
+            )
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"ticket-service error: {exc}") from exc
 

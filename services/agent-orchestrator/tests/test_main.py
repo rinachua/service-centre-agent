@@ -199,6 +199,21 @@ def test_dashboard_tickets_returns_502_when_ticket_service_unreachable(tmp_path)
 
 
 @respx.mock
+def test_dashboard_tickets_recovers_from_one_transient_failure(tmp_path):
+    """Regression test: dashboard endpoints previously made one-shot httpx calls with
+    no retry, unlike every other downstream call in the codebase (ToolExecutor has
+    always retried once). A single connection blip used to surface as a 502 to the
+    dashboard; it should now recover transparently, same as a /chat tool call would."""
+    respx.get("http://ticket-service:8001/tickets").mock(
+        side_effect=[httpx.ConnectError("refused"), httpx.Response(200, json=[{"ticket_id": "TCK-001"}])]
+    )
+    test_client = _build_client(tmp_path, FakeAnthropicClient([]))
+    resp = test_client.get("/dashboard/tickets")
+    assert resp.status_code == 200
+    assert resp.json() == [{"ticket_id": "TCK-001"}]
+
+
+@respx.mock
 def test_dashboard_assets_proxies_to_equipment_history_service(tmp_path):
     respx.get("http://equipment:8002/assets").mock(
         return_value=httpx.Response(200, json=[{"tool_id": "ETCH-07", "status": "in_use"}])

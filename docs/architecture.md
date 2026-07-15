@@ -136,7 +136,8 @@ See spec §9 (LLM cost/latency at scale — including the cost table and model-t
 rationale in §9.1, and the async-submission rejection in §9.2 — vector-store
 retrieval, recurrence-detection model, audit storage, circuit breakers, query routing
 to skip the LLM entirely for deterministic queries, and GovCloud-hosted/on-prem
-deployment topology for data residency) and this document's "What I'd improve with
-more time" section in `README.md`. Of these, the bounded hybrid flow and model
-tiering (Haiku planner / Sonnet synthesis) were actually adopted into this demo;
-query routing and deployment topology remain documented future work, not built here.
+deployment topology for data residency) and `README.md`'s "What the candidate would
+improve with more time" and "Deliberately not built (would be over-engineering at
+this scale)" sections. Of these, the bounded hybrid flow and model tiering (Haiku
+planner / Sonnet synthesis) were actually adopted into this demo; query routing and
+deployment topology remain documented future work, not built here.
