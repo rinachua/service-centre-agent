@@ -3646,7 +3646,7 @@ git commit -m "test(agent-orchestrator): rework integration test for bounded pla
 > workflow steps 1-2, trade-offs section) and is now stale. This REPLACES
 > `README.md` and `docs/architecture.md`'s content entirely with versions that
 > describe the bounded plan→execute→synthesise flow, the model-tiering choice
-> (Haiku planner / Sonnet synthesis), and folds in the gov-agency cost/trade-off
+> (Haiku planner / Sonnet synthesis), and folds in the deployment cost/trade-off
 > analysis (spec §9.1) and the async-submission rejection rationale (spec §9.2)
 > that were added to the spec after `04e713b` was written.
 
@@ -3834,7 +3834,7 @@ across services can be correlated for one user query.
 The orchestrator does NOT run an open-ended Claude tool-use loop. It runs a bounded,
 at-most-3-Claude-call flow, chosen over a live tool-use loop specifically for cost
 predictability and auditability in a cost-sensitive/regulated deployment context (see
-spec §3.1 and §9.1 for the full comparison and the gov-agency framing that drove it):
+spec §3.1 and §9.1 for the full comparison and the deployment framing that drove it):
 
 1. **Plan** (1 call, `CLAUDE_PLANNER_MODEL`, default `claude-haiku-4-5-20251001`):
    Claude receives the user query and the 7-tool schema (`get_tickets`, `get_ticket`,
@@ -3875,7 +3875,7 @@ Cross-cutting to every step:
 See spec §3.1 for the full pros/cons table comparing this bounded hybrid against a
 live Claude tool-use loop, a plain plan-then-execute flow with no revision, and
 event-driven (queue-based) inter-service calls; §9.1 for the LLM cost/latency figures
-and the gov-agency cost/auditability/model-tiering/deployment-topology considerations
+and the cost/auditability/model-tiering/deployment-topology considerations
 that motivated the pivot away from the live tool-use loop; §9.2 for why async request
 submission (job-queue decoupling of the `/chat` endpoint itself) was considered
 separately and rejected for this demo; and the deterministic-vs-LLM boundary rationale
@@ -3886,7 +3886,7 @@ for `recommendation-service`.
 See spec §9 (LLM cost/latency at scale — including the cost table and model-tiering
 rationale in §9.1, and the async-submission rejection in §9.2 — vector-store
 retrieval, recurrence-detection model, audit storage, circuit breakers, query routing
-to skip the LLM entirely for deterministic queries, and Bedrock GovCloud/on-prem
+to skip the LLM entirely for deterministic queries, and sovereign-cloud/on-prem
 deployment topology for data residency) and this document's "What I'd improve with
 more time" section in `README.md`. Of these, the bounded hybrid flow and model
 tiering (Haiku planner / Sonnet synthesis) were actually adopted into this demo;

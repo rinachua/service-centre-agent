@@ -1,6 +1,7 @@
 const messagesEl = document.getElementById("messages");
 const formEl = document.getElementById("chat-form");
 const inputEl = document.getElementById("query-input");
+const sendButtonEl = document.getElementById("send-button");
 
 formEl.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -9,6 +10,19 @@ formEl.addEventListener("submit", async (event) => {
   appendUserMessage(query);
   inputEl.value = "";
   inputEl.disabled = true;
+  sendButtonEl.disabled = true;
+
+  // A /chat call makes 1-3 sequential Claude calls (plan, synthesis, and an optional
+  // revision round) and can take anywhere from a few seconds to 30-50+ seconds
+  // depending on how much the model has to generate and whether a revision fires —
+  // a live elapsed-seconds counter, not just a static "Loading...", is what makes a
+  // long wait read as "still working" instead of "looks frozen, did something break?"
+  const loading = appendLoadingMessage();
+  const startedAt = performance.now();
+  const tickInterval = setInterval(() => {
+    const elapsedSeconds = Math.floor((performance.now() - startedAt) / 1000);
+    loading.timerEl.textContent = `${elapsedSeconds}s`;
+  }, 1000);
 
   try {
     const response = await fetch("/chat", {
@@ -16,6 +30,8 @@ formEl.addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query }),
     });
+    clearInterval(tickInterval);
+    loading.el.remove();
     if (!response.ok) {
       appendError(`Request failed (${response.status})`);
       return;
@@ -23,12 +39,34 @@ formEl.addEventListener("submit", async (event) => {
     const data = await response.json();
     appendAnswer(data.request_id, data.answer);
   } catch (err) {
+    clearInterval(tickInterval);
+    loading.el.remove();
     appendError(`Network error: ${err.message}`);
   } finally {
     inputEl.disabled = false;
+    sendButtonEl.disabled = false;
     inputEl.focus();
   }
 });
+
+function appendLoadingMessage() {
+  const el = document.createElement("div");
+  el.className = "message loading";
+
+  const dots = document.createElement("span");
+  dots.className = "loading-dots";
+  dots.textContent = "Thinking";
+  el.appendChild(dots);
+
+  const timerEl = document.createElement("span");
+  timerEl.className = "loading-timer";
+  timerEl.textContent = "0s";
+  el.appendChild(timerEl);
+
+  messagesEl.appendChild(el);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return { el, timerEl };
+}
 
 function appendUserMessage(text) {
   const el = document.createElement("div");
@@ -43,6 +81,12 @@ function appendError(text) {
   el.className = "message error";
   el.textContent = text;
   messagesEl.appendChild(el);
+  // Regression fix: unlike appendUserMessage/appendAnswer, this was missing the
+  // scroll-into-view — an error appended below the currently-visible area (e.g. from
+  // clicking "Save follow-up" deep inside an already-scrolled answer) rendered
+  // successfully but off-screen, which looked exactly like "clicked the button and
+  // nothing happened" even though an error message was actually there.
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function appendAnswer(requestId, answer) {
@@ -123,20 +167,40 @@ function appendAnswer(requestId, answer) {
     noteBox.appendChild(saveButton);
 
     saveButton.addEventListener("click", async () => {
-      const resp = await fetch(`/tickets/${note.ticket_id}/followups`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          summary: note.summary,
-          root_cause: note.root_cause,
-          next_action: note.next_action,
-        }),
-      });
-      if (resp.ok) {
-        saveButton.textContent = "Saved";
-        saveButton.disabled = true;
-      } else {
-        appendError("Failed to save follow-up note.");
+      // Regression fix: this had no try/catch at all — a fetch()-level failure
+      // (network drop, or a URL the browser can't send, e.g. a ticket_id containing
+      // "/" like "TCK-001 / TCK-002" when the synthesiser combines two tickets into
+      // one draft) threw an unhandled rejection with zero UI feedback: the button
+      // just silently did nothing. A non-OK HTTP response (e.g. 404 for a ticket_id
+      // that doesn't exist) was already handled below, but a rejected fetch() itself
+      // never reached that check.
+      saveButton.disabled = true;
+      try {
+        const resp = await fetch(`/tickets/${encodeURIComponent(note.ticket_id)}/followups`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            summary: note.summary,
+            root_cause: note.root_cause,
+            next_action: note.next_action,
+          }),
+        });
+        if (resp.ok) {
+          saveButton.textContent = "Saved";
+        } else {
+          let detail = `HTTP ${resp.status}`;
+          try {
+            const body = await resp.json();
+            if (body && body.detail) detail = body.detail;
+          } catch {
+            // Response body wasn't JSON — fall back to the HTTP status above.
+          }
+          appendError(`Failed to save follow-up note for ${note.ticket_id}: ${detail}`);
+          saveButton.disabled = false;
+        }
+      } catch (err) {
+        appendError(`Failed to save follow-up note for ${note.ticket_id}: ${err.message}`);
+        saveButton.disabled = false;
       }
     });
     el.appendChild(noteBox);

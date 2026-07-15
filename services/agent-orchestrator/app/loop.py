@@ -1,5 +1,7 @@
 import json
 import logging
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from app.grounding import extract_known_ids, scan_for_injection, verify_evidence
@@ -9,6 +11,14 @@ from app.tools import TOOL_DEFS, ServiceError
 logger = logging.getLogger("agent-orchestrator")
 
 VALID_TOOL_NAMES = {tool_def["name"] for tool_def in TOOL_DEFS}
+
+# Default: 1500 was too low and truncated real Claude synthesis
+# output mid-JSON for any query pulling back more than ~1 tool result (e.g. multiple
+# tickets from get_tickets + score_priority together) — confirmed via a live
+# stop_reason="max_tokens" log capture, not guessed. 4096 keeps this call's
+# per-request cost still fully bounded/predictable (§9.1 of the design spec), just at
+# a higher fixed ceiling.
+_SYNTHESIS_MAX_TOKENS = 4096
 
 PLAN_SYSTEM_PROMPT = """You are the planning stage of an assistant for a semiconductor
 equipment service centre. Given the user's question, decide which tool(s) to call to
@@ -188,6 +198,22 @@ def _build_synthesis_prompt(user_query: str, trace: AgentTrace) -> str:
     return f"User question: {user_query}\n\nTool results:\n{results_text}"
 
 
+@contextmanager
+def _timed_claude_call(stage: str, model: str):
+    """Diagnostic instrumentation, not a feature. Each service already logs its own
+    request-level latency (logging_middleware.py's RequestIDMiddleware), but the 1-3
+    Claude API calls inside a single /chat request were an opaque black box — a slow
+    /chat response gave no way to tell whether the time went to the LLM at all, and if
+    so, which of the plan/synthesis/revision calls. Logs elapsed time per call,
+    labelled by stage and model, so a slow request is diagnosable from logs alone
+    instead of guessed at. Deliberately just a log line, not added to trace/audit —
+    this is for an operator reading logs, not part of the answer's data."""
+    start = time.perf_counter()
+    yield
+    elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+    logger.info("Claude call completed: stage=%s model=%s elapsed_ms=%s", stage, model, elapsed_ms)
+
+
 def _record_schema_failure(
     trace: AgentTrace, stage: str, reason: str, raw_text: str = "", stop_reason: str = ""
 ) -> None:
@@ -212,11 +238,12 @@ def _record_schema_failure(
 def _synthesize(client, model: str, user_query: str, trace: AgentTrace, user_role: str = "engineer"):
     """Returns (AgentAnswer | None, sufficient: bool, additional_tool_request: dict | None)."""
     prompt = _build_synthesis_prompt(user_query, trace)
-    response = client.messages.create(
-        model=model, max_tokens=1500,
-        system=_role_framed_system_prompt(SYNTHESIS_SYSTEM_PROMPT, user_role),
-        messages=[{"role": "user", "content": prompt}],
-    )
+    with _timed_claude_call("synthesis", model):
+        response = client.messages.create(
+            model=model, max_tokens=_SYNTHESIS_MAX_TOKENS,
+            system=_role_framed_system_prompt(SYNTHESIS_SYSTEM_PROMPT, user_role),
+            messages=[{"role": "user", "content": prompt}],
+        )
     text = "".join(b.text for b in response.content if b.type == "text")
     stop_reason = getattr(response, "stop_reason", "")
     parsed = _try_parse_json(text)
@@ -234,11 +261,12 @@ def _synthesize(client, model: str, user_query: str, trace: AgentTrace, user_rol
 def _synthesize_revision(client, model: str, user_query: str, trace: AgentTrace, user_role: str = "engineer"):
     """Returns AgentAnswer | None."""
     prompt = _build_synthesis_prompt(user_query, trace)
-    response = client.messages.create(
-        model=model, max_tokens=1500,
-        system=_role_framed_system_prompt(REVISION_SYSTEM_PROMPT, user_role),
-        messages=[{"role": "user", "content": prompt}],
-    )
+    with _timed_claude_call("revision", model):
+        response = client.messages.create(
+            model=model, max_tokens=_SYNTHESIS_MAX_TOKENS,
+            system=_role_framed_system_prompt(REVISION_SYSTEM_PROMPT, user_role),
+            messages=[{"role": "user", "content": prompt}],
+        )
     text = "".join(b.text for b in response.content if b.type == "text")
     stop_reason = getattr(response, "stop_reason", "")
     parsed = _try_parse_json(text)
@@ -264,6 +292,23 @@ def _finalize(answer: AgentAnswer, trace: AgentTrace):
             f"LLM output failed schema validation at the {failure['stage']} stage "
             f"({failure['reason']}); a fallback answer was used for that stage."
         )
+    # Real bug, caught live: nothing previously constrained followup_note.ticket_id to
+    # an ID actually seen in tool results. The synthesiser sometimes wrote a
+    # placeholder ("TBD") or a combined string ("TCK-001 / TCK-002") when it judged two
+    # tickets shared one issue — neither is a real ticket_id, so "Save follow-up" would
+    # 404 against ticket-service every time, with the UI unable to do anything about
+    # it. Apply the same grounding check evidence[].record_id already gets (this
+    # function, above) to followup_note.ticket_id too: discard an unverifiable
+    # followup_note rather than hand the UI something that can never be saved.
+    if answer.followup_note is not None and answer.followup_note.ticket_id not in known_ids:
+        discarded_id = answer.followup_note.ticket_id
+        answer.followup_note = None
+        answer.assumptions.append(
+            f"A drafted follow-up note was discarded: its ticket_id ({discarded_id!r}) "
+            "did not match any real ticket seen in the tool results, so it could not "
+            "be safely saved. Ask a more specific follow-up question naming the "
+            "ticket to draft one that can be saved."
+        )
     return answer, trace
 
 
@@ -273,14 +318,15 @@ def run_agent_loop(
 ):
     trace = AgentTrace()
 
-    plan_response = client.messages.create(
-        model=planner_model,
-        max_tokens=1024,
-        system=PLAN_SYSTEM_PROMPT,
-        tools=TOOL_DEFS,
-        tool_choice={"type": "any"},
-        messages=[{"role": "user", "content": user_query}],
-    )
+    with _timed_claude_call("plan", planner_model):
+        plan_response = client.messages.create(
+            model=planner_model,
+            max_tokens=1024,
+            system=PLAN_SYSTEM_PROMPT,
+            tools=TOOL_DEFS,
+            tool_choice={"type": "any"},
+            messages=[{"role": "user", "content": user_query}],
+        )
     planned = [(b.name, b.input) for b in plan_response.content if b.type == "tool_use"]
     _execute_planned_calls(planned, tool_executor, trace)
 

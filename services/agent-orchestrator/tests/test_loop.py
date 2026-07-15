@@ -284,3 +284,121 @@ def test_ignores_invalid_tool_name_in_revision_request_without_crashing():
     assert ("not_a_real_tool", {"foo": "bar"}) not in executor.calls
     assert len(trace.tool_calls) == 1
     assert trace.tool_calls[0]["tool_name"] == "get_ticket"
+
+
+def test_synthesis_call_uses_raised_max_tokens_to_avoid_truncation():
+    """Regression test: max_tokens=1500 on the synthesis call was too low for any
+    query pulling back more than ~1 tool result, so live Claude responses got cut off
+    mid-JSON (stop_reason="max_tokens") and failed to parse, silently falling back to
+    the raw-evidence answer instead of a real recommendation — confirmed via a live
+    docker compose log capture, not assumed. Asserts the actual kwarg sent to the API,
+    not just that the code "looks right"."""
+    plan = _plan_response(FakeToolUseBlock(name="get_tickets", input={"status": "open"}, id="tu_1"))
+    synthesis = _text_response({
+        "answer": {
+            "recommendation": "Prioritise TCK-002.", "evidence": [], "assumptions": [],
+            "confidence": "low", "next_action": "Review.",
+        },
+        "sufficient": True, "additional_tool_request": None,
+    })
+    client = FakeAnthropicClient([plan, synthesis])
+    executor = FakeToolExecutor(results={"get_tickets": []})
+
+    run_agent_loop(client, "claude-haiku-4-5-20251001", "claude-sonnet-5", "prioritise tickets", executor)
+
+    synthesis_call = client.calls[1]
+    assert synthesis_call["max_tokens"] == 4096
+
+
+def test_revision_call_uses_raised_max_tokens_to_avoid_truncation():
+    """Same fix, revision call site — the revision round builds on strictly more
+    evidence than the first synthesis (original tool results plus one more), so it is
+    at least as likely to need the raised cap."""
+    plan = _plan_response(FakeToolUseBlock(name="get_ticket", input={"ticket_id": "TCK-002"}, id="tu_1"))
+    first_synthesis = _text_response({
+        "answer": {
+            "recommendation": "Need more evidence.",
+            "evidence": [], "assumptions": [], "confidence": "low", "next_action": "Pending.",
+        },
+        "sufficient": False,
+        "additional_tool_request": {"tool_name": "get_equipment_history", "input": {"tool_id": "ETCH-07"}},
+    })
+    revision = _text_response({
+        "recommendation": "Prioritise TCK-002.",
+        "evidence": [], "assumptions": [], "confidence": "low", "next_action": "Review.",
+    })
+    client = FakeAnthropicClient([plan, first_synthesis, revision])
+    executor = FakeToolExecutor(results={
+        "get_ticket": {"ticket_id": "TCK-002", "tool_id": "ETCH-07"},
+        "get_equipment_history": [],
+    })
+
+    run_agent_loop(client, "claude-haiku-4-5-20251001", "claude-sonnet-5", "any question", executor)
+
+    revision_call = client.calls[2]
+    assert revision_call["max_tokens"] == 4096
+
+
+def test_discards_followup_note_with_placeholder_ticket_id_not_seen_in_tool_results():
+    """Regression test for a real bug caught live: the synthesiser wrote
+    followup_note.ticket_id = "TBD" (a placeholder, not a real ticket) when a query
+    didn't clearly map to one ticket. Nothing previously stopped that from reaching
+    the UI, where "Save follow-up" would 404 against ticket-service every time with no
+    way to recover. This applies the same grounding check evidence[].record_id already
+    gets to followup_note.ticket_id: an unverifiable ticket_id means the note gets
+    discarded (not silently kept), with the reason recorded in assumptions."""
+    plan = _plan_response(FakeToolUseBlock(name="get_tickets", input={"status": "open"}, id="tu_1"))
+    synthesis = _text_response({
+        "answer": {
+            "recommendation": "Draft a general follow-up.",
+            "evidence": [],
+            "assumptions": [],
+            "confidence": "low",
+            "next_action": "Review.",
+            "followup_note": {
+                "ticket_id": "TBD",
+                "summary": "s", "root_cause": "r", "next_action": "n",
+            },
+        },
+        "sufficient": True,
+        "additional_tool_request": None,
+    })
+    client = FakeAnthropicClient([plan, synthesis])
+    executor = FakeToolExecutor(results={"get_tickets": [{"ticket_id": "TCK-001"}]})
+
+    answer, trace = run_agent_loop(
+        client, "claude-haiku-4-5-20251001", "claude-sonnet-5", "draft a follow-up note", executor
+    )
+
+    assert answer.followup_note is None
+    assert any("TBD" in a and "discarded" in a for a in answer.assumptions)
+
+
+def test_keeps_followup_note_with_ticket_id_actually_seen_in_tool_results():
+    """Sanity check alongside the regression test above: a real, verifiable
+    ticket_id must NOT be discarded — only unverifiable ones should be."""
+    plan = _plan_response(FakeToolUseBlock(name="get_tickets", input={"status": "open"}, id="tu_1"))
+    synthesis = _text_response({
+        "answer": {
+            "recommendation": "Draft a follow-up for TCK-001.",
+            "evidence": [],
+            "assumptions": [],
+            "confidence": "low",
+            "next_action": "Review.",
+            "followup_note": {
+                "ticket_id": "TCK-001",
+                "summary": "s", "root_cause": "r", "next_action": "n",
+            },
+        },
+        "sufficient": True,
+        "additional_tool_request": None,
+    })
+    client = FakeAnthropicClient([plan, synthesis])
+    executor = FakeToolExecutor(results={"get_tickets": [{"ticket_id": "TCK-001"}]})
+
+    answer, trace = run_agent_loop(
+        client, "claude-haiku-4-5-20251001", "claude-sonnet-5", "draft a follow-up note for TCK-001", executor
+    )
+
+    assert answer.followup_note is not None
+    assert answer.followup_note.ticket_id == "TCK-001"

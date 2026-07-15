@@ -158,22 +158,27 @@ scale, not scoping decisions:
   connection, loaded document set), not just that the process is alive — but there is
   still no separate liveness vs. readiness distinction (e.g. Kubernetes-style probes),
   since Docker Compose's `healthcheck` only needs one signal here.
+- **`/chat` latency with a live Claude key can be high — 15-50+ seconds observed on
+  real queries, not a bug to be optimised away.** Calling Claude is simply slow:
+  every `/chat` request makes 1-3 Claude API calls in sequence (plan → synthesis →
+  optionally one more tool call + revision-synthesis — §6.1), and each is a
+  *blocking* call — the next one can't start until the previous finishes generating.
+  The synthesis step in particular has to produce a full structured JSON answer
+  (recommendation, evidence list, assumptions), and generation time scales with how
+  much text that is — a query that also triggers the one-revision path pays for two
+  full synthesis generations back to back. This is the direct cost of the
+  bounded-hybrid design's auditability/predictability trade-off (§9.1): the
+  alternative considered and rejected, a live tool-use loop, makes *more* sequential
+  calls (3-6, uncapped), so it would be equally or more latency-bound, not faster
+  (see the design spec's latency analysis, added alongside this limitation).
 
 ## What the candidate would improve with more time
-
-The first two are buildable now, with no external precondition. The third is
-genuinely blocked on data this demo doesn't have — worth naming as the honest next
-step, not something to fake with more time alone:
-
 - **Back the `X-User-Role` framing stub with real authentication.** Issue signed JWTs
   carrying a role claim and verify them in `agent-orchestrator` middleware, so a role
   is cryptographically asserted rather than trusted from an unauthenticated header.
   This is a direct extension of the RBAC-assumptions stub already built (spec §9.3),
   not a new subsystem — no user store or login UI needed for a demo-scale version, just
   token issuance/verification with a shared signing secret.
-- **Pin dependencies to exact versions** (`pip freeze > requirements.lock` per
-  service, or a lockfile-based tool) instead of the current `>=` floors, for fully
-  reproducible builds.
 - **Replace `recommendation-service`'s fixed-formula scoring with an ML model
   engine.** `scoring.py` currently ranks tickets with a hand-picked weighted
   formula (0.4×severity + 0.3×downtime + 0.2×recurrence + 0.1×age) — transparent and

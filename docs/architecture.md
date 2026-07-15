@@ -57,7 +57,7 @@ across services can be correlated for one user query.
 The orchestrator does NOT run an open-ended Claude tool-use loop. It runs a bounded,
 at-most-3-Claude-call flow, chosen over a live tool-use loop specifically for cost
 predictability and auditability in a cost-sensitive/regulated deployment context (see
-spec §3.1 and §9.1 for the full comparison and the gov-agency framing that drove it).
+spec §3.1 and §9.1 for the full comparison and the deployment framing that drove it).
 
 **LLM client: live by default, offline fallback only when needed.** Every "Claude call"
 below is a real, live call to the Anthropic API whenever `ANTHROPIC_API_KEY` is set — this
@@ -124,7 +124,7 @@ Cross-cutting to every step:
 See spec §3.1 for the full pros/cons table comparing this bounded hybrid against a
 live Claude tool-use loop, a plain plan-then-execute flow with no revision, and
 event-driven (queue-based) inter-service calls; §9.1 for the LLM cost/latency figures
-and the gov-agency cost/auditability/model-tiering/deployment-topology considerations
+and the cost/auditability/model-tiering/deployment-topology considerations
 that motivated the pivot away from the live tool-use loop; §9.2 for why async request
 submission (job-queue decoupling of the `/chat` endpoint itself) was considered
 separately and rejected for this demo; and the deterministic-vs-LLM boundary rationale
@@ -135,7 +135,7 @@ for `recommendation-service`.
 See spec §9 (LLM cost/latency at scale — including the cost table and model-tiering
 rationale in §9.1, and the async-submission rejection in §9.2 — vector-store
 retrieval, recurrence-detection model, audit storage, circuit breakers, query routing
-to skip the LLM entirely for deterministic queries, and GovCloud-hosted/on-prem
+to skip the LLM entirely for deterministic queries, and sovereign-cloud/on-prem
 deployment topology for data residency) and `README.md`'s "What the candidate would
 improve with more time" and "Deliberately not built (would be over-engineering at
 this scale)" sections. Of these, the bounded hybrid flow and model tiering (Haiku

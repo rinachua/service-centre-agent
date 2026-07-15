@@ -471,11 +471,33 @@ At Claude Sonnet 5 introductory pricing ($2/MTok input, $10/MTok output through 
 | Typical (e.g. "summarise ETCH-07 alarms + likely causes") | 3-4 | ~$0.027 |
 | Heavy (compare historical cases + draft follow-up note) | 5-6 | ~$0.05 |
 
+**Known limitation: wall-clock latency, not just $ cost.** The table above is about
+spend; a separate, real-world-observed problem is response time. Calling Claude is
+simply slow: a live `/chat` call was measured at **51.74s** for a typical multi-ticket
+prioritisation-plus-reasoning query — high enough to look broken rather than slow
+without a loading indicator (now added to the UI, `static/app.js`). The cause is
+structural, not a bug to be tuned away: every Claude call in the bounded hybrid (§6.1)
+is sequential and blocking — the next can't start until the previous finishes
+generating — and the synthesis step produces a full structured JSON answer, whose
+generation time scales with how much text that is. A query that also triggers the one
+optional revision round pays for two full synthesis generations back to back.
+Critically, the live tool-use loop rejected above would not fix this: it makes *more*
+sequential calls (3-6, uncapped) than the bounded hybrid's ceiling of 3, so it is
+equally or more latency-bound, never less — the latency problem and the
+cost-predictability problem this section already argues for are the same problem,
+solved by the same shape. (One contributing factor has since been addressed:
+`max_tokens=1500` on the synthesis call was too low for a multi-ticket answer,
+causing `stop_reason="max_tokens"` truncation and a failed JSON parse on some queries
+— raised to 4096, with a regression test asserting the actual API call kwarg,
+`app/loop.py`.) See `README.md`'s `/chat` latency bullet under "Known limitations and
+assumptions" for this same finding stated as a limitation.
+
 For this demo's expected volume (a handful of engineers/managers, occasional queries)
-this is immaterial — total spend across development and a recorded demo comes to a few
-dollars. It stops being immaterial, and the live loop stops being the right choice,
+the $ cost above is immaterial — total spend across development and a recorded demo
+comes to a few dollars. It stops being immaterial, and the live loop stops being the
+right choice,
 in a deployment where cost predictability and auditability matter as much as raw
-average cost — a government agency procuring this system is the clearest example:
+average cost — a large-scale, cost-sensitive procurement is the clearest example:
 
 - **Cost predictability over lowest average cost.** Budget cycles and procurement
   want a bounded, predictable per-query cost, not a variable 3-6 call range. A
@@ -502,18 +524,19 @@ average cost — a government agency procuring this system is the clearest examp
   the step that needs real reasoning (final synthesis over evidence). Stacks with
   either orchestration pattern.
 - **Deployment topology, not just orchestration.** Semiconductor fab operational data
-  can be strategically sensitive. A real government deployment might have a hard
+  can be strategically sensitive. A regulated deployment might have a hard
   data-residency requirement rather than a soft cost preference — Claude via a
-  GovCloud-hosted offering, or an on-prem/open-weight model, rather than the public
-  API. That is a different axis entirely from how the agent plans and calls tools,
-  and would need to be resolved before the cost question is even relevant.
+  sovereign or dedicated-cloud offering, or an on-prem/open-weight model, rather than
+  the public API. That is a different axis entirely from how the agent plans and
+  calls tools, and would need to be resolved before the cost question is even
+  relevant.
 
 The first bullet's bounded hybrid and model-tiering levers were adopted into the demo
 itself (§3.1, §6.1) after this analysis — a cost-sensitive/regulated deployment context
 was the deciding factor, not a raw agentic-ness score. Query routing (skipping the LLM
-entirely for purely deterministic queries) and deployment topology (GovCloud/on-prem)
-were not implemented, and remain documented future work: query routing would add a
-pre-agent classification step outside this plan's scope, and topology is an
+entirely for purely deterministic queries) and deployment topology (sovereign-cloud/
+on-prem) were not implemented, and remain documented future work: query routing would
+add a pre-agent classification step outside this plan's scope, and topology is an
 infrastructure decision independent of the application code.
 
 ### 9.2 Why async request submission was not considered for this demo
