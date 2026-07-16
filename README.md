@@ -49,7 +49,7 @@ Optionally set `X-User-Role: manager` (or `engineer`, the default) on `/chat` to
 how the answer is framed — downtime/cost/trend framing for a manager vs. alarm
 codes/part numbers/concrete steps for an engineer. This is a caller-asserted framing
 hint only, not real access control: every role sees the same tool results and
-evidence, only the recommendation's wording differs. See the design spec's §9.3 for
+evidence, only the recommendation's wording differs. See the design spec's §8 for
 what this stub does and does not cover.
 
 ```bash
@@ -69,9 +69,14 @@ curl -s "http://localhost:8000/audit?limit=20"
 ## Dashboard
 
 Open `http://localhost:8000/dashboard.html` for an at-a-glance view of priority-ranked
-open tickets, asset status, and the recent audit trail. The browser only ever talks to
-`agent-orchestrator` (same-origin); it proxies the ticket/equipment/recommendation
-calls server-to-server so the other 4 services never need CORS configuration.
+open tickets, asset status, recently saved follow-up notes, and the audit trail (each
+flagged with plain-language issues like "Suspicious input detected" or "AI output
+needed retry" where relevant). The browser only ever talks to `agent-orchestrator`
+(same-origin); it proxies the ticket/equipment/recommendation calls server-to-server
+so the other 4 services never need CORS configuration. The dashboard links back to
+`http://localhost:8000/index.html` (the chat UI)
+and vice versa, so you can move between chatting with the agent and viewing the
+underlying data.
 
 ## Model tiering and cost bound
 
@@ -116,6 +121,13 @@ service fails, prompt-injection content gets flagged) run against the determinis
 `OfflineResponder` rather than pinning exact LLM output — free to run, no API key
 needed, and stable across model updates.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push/PR to `main`: pytest for each of the 5
+services (matrix job), a `ruff` lint pass over `services/`, `common/`, and `scripts/`,
+and a drift check (`scripts/sync-common.py --check`) that fails the build if any
+service's copy of `logging_middleware.py` has diverged from `common/`.
+
 ## Querying the database directly
 
 Each service's SQLite file lives in a Docker named volume, not on the host. For ad hoc
@@ -146,7 +158,7 @@ scale, not scoping decisions:
 - No real authentication/authorization is implemented. The `X-User-Role` header (see
   "Run everything" above) only changes response *framing*, never data access or tool
   selection — it is a caller-asserted, unauthenticated hint, not enforcement. See the
-  design spec's §8 "Security / access-control assumption" and §9.3 "RBAC assumptions"
+  design spec's §8 "Security / access-control assumption"
   (`docs/superpowers/specs/2026-07-11-service-centre-agent-design.md`).
 - The agent can only draft follow-up notes; persisting one requires an explicit
   "Save follow-up" click in the UI (or a direct call to
@@ -174,7 +186,7 @@ scale, not scoping decisions:
 - **Back the `X-User-Role` framing stub with real authentication.** Issue signed JWTs
   carrying a role claim and verify them in `agent-orchestrator` middleware, so a role
   is cryptographically asserted rather than trusted from an unauthenticated header.
-  This is a direct extension of the RBAC-assumptions stub already built (spec §9.3),
+  This is a direct extension of the RBAC-assumptions stub already built (spec §8),
   not a new subsystem — no user store or login UI needed for a demo-scale version, just
   token issuance/verification with a shared signing secret.
 - **Replace `recommendation-service`'s fixed-formula scoring with an ML model
