@@ -76,7 +76,7 @@ CLAUDE_PLANNER_MODEL=claude-haiku-4-5-20251001
 
 Setup and run instructions are in this file once Task 14 completes. Until then,
 see `docs/superpowers/specs/eng-specs-service-centre-agent.md` and
-`docs/superpowers/plans/2026-07-11-service-centre-agent-implementation.md`.
+`docs/superpowers/plans/implementation-plan.md`.
 ```
 
 - [ ] **Step 5: Commit**
@@ -3824,7 +3824,7 @@ SQLite                  service (:8002)         TF-IDF search
 
 Each REST service and the orchestrator's endpoints are documented in the plan's
 per-task "Interfaces" sections; see
-`docs/superpowers/plans/2026-07-11-service-centre-agent-implementation.md` Tasks 3-10
+`docs/superpowers/plans/implementation-plan.md` Tasks 3-10
 for the authoritative list of routes, request/response shapes, and status codes.
 Every downstream call from the orchestrator carries `X-Request-ID` so log lines
 across services can be correlated for one user query.
