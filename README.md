@@ -4,7 +4,7 @@ A conversational assistant for equipment engineers and service managers: priorit
 open tickets, investigate root causes, and generate structured follow-up notes,
 grounded in purpose-built backend services rather than free-form LLM guessing.
 
-See `docs/superpowers/specs/eng-specs-service-centre-agent.md` for the full
+See `docs/eng-specs-service-centre-agent.md` for the full
 design rationale, architecture, and trade-off analysis.
 
 ## Prerequisites
@@ -159,7 +159,7 @@ scale, not scoping decisions:
   "Run everything" above) only changes response *framing*, never data access or tool
   selection — it is a caller-asserted, unauthenticated hint, not enforcement. See the
   design spec's §8 "Security / access-control assumption"
-  (`docs/superpowers/specs/eng-specs-service-centre-agent.md`).
+  (`docs/eng-specs-service-centre-agent.md`).
 - The agent can only draft follow-up notes; persisting one requires an explicit
   "Save follow-up" click in the UI (or a direct call to
   `POST /tickets/{ticket_id}/followups`) — this is a deliberate human-in-the-loop
