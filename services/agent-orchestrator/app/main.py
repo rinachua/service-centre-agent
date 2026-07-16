@@ -140,6 +140,27 @@ def create_app(
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"ticket-service error: {exc}") from exc
 
+    @app.get("/dashboard/followups")
+    def dashboard_followups(limit: int = 20):
+        # ticket-service only exposes GET /tickets/{id}/followups (per-ticket), not a
+        # global list — so this fans out one call per ticket and merges the results
+        # here. That's an N+1 pattern that wouldn't scale past a handful of tickets,
+        # but at this demo's data volume (a few dozen seed tickets) it's simpler than
+        # standing up a new cross-ticket endpoint on ticket-service for one dashboard
+        # view. Revisit if the ticket count grows enough for this to matter.
+        try:
+            tickets = request_with_retry("GET", f"{ticket_url}/tickets")
+            all_followups = []
+            for ticket in tickets:
+                followups = request_with_retry(
+                    "GET", f"{ticket_url}/tickets/{ticket['ticket_id']}/followups"
+                )
+                all_followups.extend(followups)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"ticket-service error: {exc}") from exc
+        all_followups.sort(key=lambda f: f["created_at"], reverse=True)
+        return all_followups[:limit]
+
     if static_dir and static_dir.exists():
         app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 

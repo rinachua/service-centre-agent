@@ -90,10 +90,10 @@ async function loadAudit() {
         { label: "Query", render: (r) => escapeHtml(r.user_query) },
         { label: "Confidence", render: (r) => (r.confidence ? severityBadge(r.confidence) : "-") },
         {
-          label: "Flags",
+          label: "Issues detected",
           render: (r) =>
-            (r.had_injection_flags ? '<span class="badge badge-flag">injection</span>' : "") +
-            (r.had_schema_validation_failures ? '<span class="badge badge-flag">schema</span>' : ""),
+            (r.had_injection_flags ? '<span class="badge badge-flag">Suspicious input detected</span>' : "") +
+            (r.had_schema_validation_failures ? '<span class="badge badge-flag">AI output needed retry</span>' : ""),
         },
         { label: "When", render: (r) => escapeHtml(r.created_at) },
       ],
@@ -104,6 +104,29 @@ async function loadAudit() {
   }
 }
 
+async function loadFollowups() {
+  try {
+    const resp = await fetch("/dashboard/followups?limit=20");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const rows = await resp.json();
+    renderTable(
+      "followups-table",
+      rows,
+      [
+        { label: "Ticket", render: (r) => escapeHtml(r.ticket_id) },
+        { label: "Summary", render: (r) => escapeHtml(r.summary) },
+        { label: "Root cause", render: (r) => escapeHtml(r.root_cause) },
+        { label: "Next action", render: (r) => escapeHtml(r.next_action) },
+        { label: "Saved", render: (r) => escapeHtml(r.created_at) },
+      ],
+      "No follow-up notes saved yet.",
+    );
+  } catch (err) {
+    renderError("followups-table", err);
+  }
+}
+
 loadPriority();
 loadAssets();
 loadAudit();
+loadFollowups();

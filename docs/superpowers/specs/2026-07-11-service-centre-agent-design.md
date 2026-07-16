@@ -35,84 +35,79 @@ Four example queries define the acceptance bar:
   log's `schema_validation_failures` column); an evaluation harness
   (`tests/test_evaluation_harness.py`) and a dashboard (`GET /dashboard/*`,
   `static/dashboard.html`) are both built; RBAC is built as scoped, unenforced
-  *assumptions* (§9.3), not real access control — real RBAC enforcement remains future
-  work (§8). Event-driven ticket ingestion / scheduled refresh is the one stretch goal
+  *assumptions*, not real access control — real RBAC enforcement remains deferred
+  future work (both §8). Event-driven ticket ingestion / scheduled refresh is the one stretch goal
   deliberately not built, with reasoning in §9's trade-offs list.
 
 ## 3. Architecture overview
 
 ```
-                         ┌─────────────────────────┐
+                         ┌──────────────────────────┐
                          │   Chat UI (static JS)    │
                          │   served by orchestrator │
                          └────────────┬─────────────┘
                                       │ POST /chat
                                       ▼
-                         ┌─────────────────────────┐
+                         ┌──────────────────────────┐
                          │   agent-orchestrator     │◄──── audit_log (SQLite)
                          │   (FastAPI + bounded     │
                          │   plan→execute→synth)    │
-                         └───┬───────┬───────┬──────┘
-                 REST        │       │       │        REST
-        ┌────────────────────┘       │       └────────────────────┐
-        ▼                            ▼                            ▼
-┌───────────────┐         ┌────────────────────┐         ┌──────────────────┐
-│ ticket-service │         │ equipment-history-  │         │ knowledge-service │
-│ (SQLite)       │         │ service (SQLite)    │         │ (TF-IDF search)   │
-└───────────────┘         └────────────────────┘         └──────────────────┘
-        ▲
-        │ REST
-        │
-┌───────────────────┐
-│ recommendation-    │
-│ service (rule-based│
-│ scoring, no LLM)   │
-└───────────────────┘
+                         └──┬──────┬──────┬──────┬──┘
+                REST        │      │      │      │      REST
+        ┌───────────────────┘      │      │      └───────────────────────────────┐
+        │                  ┌───────┘      └────────────┐                         │
+        ▼                  ▼                           ▼                         ▼
+┌────────────────┐  ┌─────────────────────┐     ┌───────────────────┐    ┌──────────────────────┐
+│ ticket-service │  │ equipment-history-  │     │ knowledge-service │    │ recommendation-      │
+│ (SQLite)       │  │ service (SQLite)    │     │ (TF-IDF search)   │    │ service (rule-based) │
+└────────────────┘  └─────────────────────┘     └───────────────────┘    └──────────────────────┘
+                                                                   
 ```
 
 All inter-service calls are synchronous REST (`httpx`) over the Compose network. The
 orchestrator is the only service that talks to Claude and the only service the UI talks
 to — other services are never called directly by the client, and never call each other.
+All four downstream services, including `recommendation-service`, are called directly
+by `agent-orchestrator`; none of them are called by another backend service. In
+particular, `score_priority` (§4.5's `ToolExecutor._tool_score_priority`) is a compound
+tool the orchestrator itself runs in three sequential REST calls — `GET /tickets` on
+ticket-service, then `GET /assets/{tool_id}/history` on equipment-history-service for
+each affected tool, then `POST /priority-score` on recommendation-service with both
+results — not a chain where one backend service calls another.
+`recommendation-service`'s own code makes no outbound HTTP calls at all; it is a pure
+function over whatever the orchestrator hands it.
 
 **Agentic AI components, named explicitly.** This is an agentic AI system, not a chatbot
 wrapped around an LLM: `agent-orchestrator` is the agent, and it decomposes into the
 standard planner/act/reason/verify roles, each mapped to a concrete piece of code below
 rather than left implicit.
 
-| Agentic role | What plays that role | Where it lives |
-|---|---|---|
-| **Perception (input)** | The static chat UI's `POST /chat` request — a natural-language user query, no structure required. | `agent-orchestrator` `/chat` endpoint (§6.4) |
-| **Planner** | One Claude call (cheap model) that reads the query and the tool schema, and decides which tool(s) to invoke — never sees results before deciding, never free-texts. | `run_agent_loop`'s plan phase (§6.1) |
+| Agentic role | What plays that role                                                                                                                                                                                              | Where it lives |
+|---|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---|
+| **Perception (input)** | The static chat UI's `POST /chat` request — a natural-language user query, no structure required.                                                                                                                 | `agent-orchestrator` `/chat` endpoint (§6.4) |
+| **Planner** | One Claude call - using Haiku model (the cheaper model) that reads the query and the tool schema, and decides which tool(s) to invoke — never sees results before deciding, never free-texts.                     | `run_agent_loop`'s plan phase (§6.1) |
 | **Tools / actions** | The only way the agent touches data — never direct DB access. Four distinct capabilities: read tickets, read equipment/alarm history, retrieve knowledge-base text (RAG), and get a deterministic priority score. | `ticket-service`, `equipment-history-service`, `knowledge-service`, `recommendation-service` (§4) |
-| **Executor** | Deterministic router that turns the planner's tool requests into real REST calls, with timeout/retry/error-containment — no LLM involved in this step. | `ToolExecutor` (§4.5) |
-| **Reasoner / synthesiser** | One Claude call (full model) that turns raw tool results into the structured final answer — recommendation, evidence, assumptions, confidence, next action. | `run_agent_loop`'s synthesise phase (§6.1, §6.2) |
-| **Self-critique / recovery** | The synthesiser judges its own evidence and can request exactly one more planner→executor→synthesiser round if insufficient — capped, not open-ended. | The "optional single revision" step (§6.1) |
-| **Verifier (grounding)** | Checks every cited `record_id` in the final answer against IDs actually returned by tool calls that session; flags anything unverifiable rather than trusting it. | `verify_evidence` / `extract_known_ids` (§6.3) |
-| **Memory (per-request, not conversational)** | Persists the full tool-call trace, injection flags, and final answer for later audit/replay. Each `/chat` call is independent — there is no multi-turn conversation memory across requests. | `audit_log` SQLite table, `GET /audit/{request_id}` (§7) |
-| **Action gate (human-in-the-loop)** | The agent only ever *drafts* a follow-up note; nothing is written to `ticket-service` without an explicit, separate human action. | UI "Save follow-up" button → `POST /tickets/{ticket_id}/followups` (§6.4) |
-| **Fallback planner/reasoner** | Deterministic, rule-based stand-in for the planner and synthesiser roles above when no LLM is available — same roles, same flow, different implementation. | `OfflineResponder` (§6.6) |
+| **Executor** | Deterministic router that turns the planner's tool requests into real REST calls, with timeout/retry/error-containment — no LLM involved in this step.                                                            | `ToolExecutor` (§4.5) |
+| **Reasoner / synthesiser** | One Claude call (full model) that turns raw tool results into the structured final answer — recommendation, evidence, assumptions, confidence, next action.                                                       | `run_agent_loop`'s synthesise phase (§6.1, §6.2) |
+| **Self-critique / recovery** | The synthesiser judges its own evidence and can request exactly one more planner→executor→synthesiser round if insufficient — capped, not open-ended.                                                             | The "optional single revision" step (§6.1) |
+| **Verifier (grounding)** | Checks every cited `record_id` in the final answer against IDs actually returned by tool calls that session; flags anything unverifiable rather than trusting it.                                                 | `verify_evidence` / `extract_known_ids` (§6.3) |
+| **Memory (per-request, not conversational)** | Persists the full tool-call trace, injection flags, and final answer for later audit/replay. Each `/chat` call is independent — there is no multi-turn conversation memory across requests.                       | `audit_log` SQLite table, `GET /audit/{request_id}` (§7) |
+| **Action gate (human-in-the-loop)** | The agent only ever *drafts* a follow-up note; nothing is written to `ticket-service` without an explicit, separate human action.                                                                                 | UI "Save follow-up" button → `POST /tickets/{ticket_id}/followups` (§6.4) |
+| **Fallback planner/reasoner** | Deterministic, rule-based stand-in for the planner and synthesiser roles above when no LLM is available — same roles, same flow, different implementation.                                                        | `OfflineResponder` (§6.6) |
 
-### 3.1 Why this shape (vs. alternatives considered)
+### 3.1 Choosing the orchestration pattern
 
-| Approach | Description | Pros | Cons | Decision |
-|---|---|---|---|---|
-| **Bounded hybrid: plan → execute → synthesise, with one capped revision** (chosen) | One Claude call (cheap model) turns the query into a tool-call plan; a deterministic router executes it; one Claude call (full model) synthesises the answer and flags whether evidence was sufficient. If not, exactly one more execute→synthesise round runs — never more. | Fixed worst-case cost ceiling (2 calls typical, 3 max, vs. an open-ended 3-6) and therefore predictable at procurement/budget-planning time; the "plan" is a discrete, loggable artifact — stronger auditability story than an autonomous loop deciding its own next step; still recovers from a wrong first plan once, unlike plain plan-then-execute; cheap model on the planning call, full model only where reasoning quality matters (model tiering). | Less adaptive than a fully open loop in the rare case where more than one revision would genuinely help; the plan/synthesis split adds a small amount of orchestration complexity (a JSON contract between the two phases) that a single continuous loop doesn't need. | **Chosen.** Revised from an initial live tool-use loop after weighing cost predictability and auditability for a cost-sensitive/regulated deployment context — see §9.1. |
-| **Live Claude tool-use loop** | Claude sees each tool result and decides the next call itself, over REST calls to each service, for up to 6 rounds. | Most genuinely agentic option — the plan can change mid-investigation on every single tool result, not just once; naturally supports "show me the evidence" since every tool call is already logged. | More LLM round-trips per query (3-6 calls, variable and hard to predict) → higher and less predictable cost/latency. At Claude Sonnet 5 pricing (introductory, through Aug 2026): roughly **$0.017 for a simple query, $0.027 typical, up to ~$0.05 for a heavy multi-tool investigation** — see §9.1. An autonomous loop is also a weaker audit story than a discrete, reviewable plan. **Expensive to scale to production**: cost grows per-query with how many rounds each one needs, not a fixed ceiling, so spend scales unpredictably with query volume and complexity rather than linearly. | Considered first, superseded by the bounded hybrid above once cost predictability and auditability were weighted alongside "most agentic" — see §9.1. |
-| **Plain plan-then-execute (no revision)** | One Claude call produces a JSON plan, a deterministic router executes it, a second Claude call synthesises the answer — always exactly 2 calls, no recovery path. | Cheapest and most predictable of all three — fixed 2 calls, always. | Can't adapt at all if the first plan turns out wrong; the bounded hybrid gets almost all of this pattern's cost benefit while keeping a capped recovery path, so this variant's extra restriction wasn't worth it. | Rejected — the bounded hybrid dominates it. |
-| **Event-driven (queue) inter-service calls** | Orchestrator publishes tool-call requests to a broker (e.g. Redis/RabbitMQ); services subscribe and respond async. | Matches one of the brief's allowed interface styles; demonstrates async/event-driven patterns. | Adds broker infrastructure and response-correlation complexity disproportionate to a lightweight demo; brief explicitly says REST is acceptable. | Rejected. |
+| Approach                                                                    | Description                                                                                                                                                                                                                                                                                                                        | Pros | Cons | Decision |
+|-----------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---|---|---|
+| **✅ Bounded hybrid: plan → execute → synthesise, with one capped revision** | One Claude call — using Haiku model (the cheaper model) turns the query into a tool-call plan; a deterministic router executes it; one Claude call — using Sonnet model (the stronger model) synthesises the answer and flags whether evidence was sufficient. If not, exactly one more execute→synthesise round runs — never more. | Fixed worst-case cost ceiling (2 calls typical, 3 max, vs. an open-ended 3-6) and therefore predictable at procurement/budget-planning time; the "plan" is a discrete, loggable artifact — stronger auditability story than an autonomous loop deciding its own next step; still recovers from a wrong first plan once, unlike plain plan-then-execute; cheap model on the planning call, full model only where reasoning quality matters (model tiering). | Less adaptive than a fully open loop in the rare case where more than one revision would genuinely help; the plan/synthesis split adds a small amount of orchestration complexity (a JSON contract between the two phases) that a single continuous loop doesn't need. | **Chosen.** Revised from an initial live tool-use loop after weighing cost predictability and auditability for a cost-sensitive/regulated deployment context — see §9.1. |
+| **Live Claude tool-use loop**                                               | Claude sees each tool result and decides the next call itself, over REST calls to each service, for up to 6 rounds.                                                                                                                                                                                                                | Most genuinely agentic option — the plan can change mid-investigation on every single tool result, not just once; naturally supports "show me the evidence" since every tool call is already logged. | More LLM round-trips per query (3-6 calls, variable and hard to predict) → higher and less predictable cost/latency. At Claude Sonnet 5 pricing (introductory, through Aug 2026): roughly **$0.017 for a simple query, $0.027 typical, up to ~$0.05 for a heavy multi-tool investigation** — see §9.1. An autonomous loop is also a weaker audit story than a discrete, reviewable plan. **Expensive to scale to production**: cost grows per-query with how many rounds each one needs, not a fixed ceiling, so spend scales unpredictably with query volume and complexity rather than linearly. | Considered first, superseded by the bounded hybrid above once cost predictability and auditability were weighted alongside "most agentic" — see §9.1. |
+| **Plain plan-then-execute (no revision)**                                   | One Claude call produces a JSON plan, a deterministic router executes it, a second Claude call synthesises the answer — always exactly 2 calls, no recovery path.                                                                                                                                                                  | Cheapest and most predictable of all three — fixed 2 calls, always. | Can't adapt at all if the first plan turns out wrong; the bounded hybrid gets almost all of this pattern's cost benefit while keeping a capped recovery path, so this variant's extra restriction wasn't worth it. | Rejected — the bounded hybrid dominates it. |
+| **Event-driven (queue) inter-service calls**                                | Orchestrator publishes tool-call requests to a broker (e.g. Redis/RabbitMQ); services subscribe and respond async.                                                                                                                                                                                                                 | Matches one of the brief's allowed interface styles; demonstrates async/event-driven patterns. | Adds broker infrastructure and response-correlation complexity disproportionate to a lightweight demo; brief explicitly says REST is acceptable. | Rejected. |
 
-**Deterministic vs. LLM boundary.** `recommendation-service` does priority *scoring*
-(a weighted formula: severity, downtime impact, recurrence, ticket age) — deterministic,
-auditable, and cheap, because ranking a fixed set of tickets by known fields doesn't
-benefit from an LLM and benefits a lot from being reproducible. Root-cause *hypotheses*
-are generated by Claude, because that requires synthesising unstructured evidence
-(alarm patterns, SOP text, shift notes) in a way a fixed formula can't. This split is
-called out explicitly because the assessment asks for it.
-
-**Note on LLM availability.** The comparison above is about call *pattern* (how many
-Claude calls, in what shape) and holds regardless of which client answers those calls.
-A separate, orthogonal decision — what happens when no `ANTHROPIC_API_KEY` is available at
-all — is documented in §6.6, not here.
+(This comparison is about call *pattern* — how many Claude calls, in what shape — and
+holds regardless of which client answers those calls; what happens when no
+`ANTHROPIC_API_KEY` is available at all is a separate, orthogonal decision documented
+in §6.6.)
 
 ## 4. Services
 
@@ -131,6 +126,10 @@ Fields: `ticket_id, tool_id, line, process_area, title, description, severity
 (critical/high/medium/low), status (open/in_progress/closed), downtime_impact_hours,
 reported_by, created_at`.
 
+The browser never calls `POST /tickets/{ticket_id}/followups` here directly — it goes
+through `agent-orchestrator`'s identically-shaped proxy endpoint (§4.5), same as the
+dashboard data endpoints, since ticket-service has no CORS configuration.
+
 ### 4.2 equipment-history-service (port 8002)
 
 Owns equipment assets and their alarm/maintenance history.
@@ -146,11 +145,7 @@ date, resolution, parts_replaced`.
 
 ### 4.3 knowledge-service (port 8003)
 
-Retrieval over unstructured documents: troubleshooting guides, SOP excerpts, shift
-handover notes. Implemented with hand-rolled, pure-Python TF-IDF + cosine similarity
-(no `scikit-learn`) — no embedding API calls, no vector DB, deterministic and free to
-run. Realistic for a 3-document corpus; documented in §9 as the first thing to swap for
-a real vector store at production scale.
+Retrieves from unstructured documents — troubleshooting guides, SOP excerpts, shift handover notes — using pure-Python TF-IDF and cosine similarity (no `scikit-learn`). No embedding API calls, no vector DB: deterministic and free to run, which is realistic at this 3-document scale. §9 documents this as the first thing to swap for a real vector store once the corpus grows.
 
 | Endpoint | Purpose |
 |---|---|
@@ -165,11 +160,28 @@ Deterministic, rule-based. No LLM calls.
 |---|---|
 | `POST /priority-score` | Given a list of ticket IDs (or "all open"), return ranked list with per-factor score breakdown |
 
-Scoring formula (weights configurable via env, defaults shown):
+Scoring formula (weights are configurable, defaults shown):
 `score = 0.4*severity_weight + 0.3*downtime_hours_normalised + 0.2*recurrence_count + 0.1*age_days_normalised`.
-Recurrence count is derived by matching open tickets against equipment-history-service
-records for the same `tool_id` and similar `code`/description (simple substring/keyword
-match, not ML).
+Each term is normalised to a 0–1 range before being weighted: `severity_weight` comes
+from a fixed lookup (critical=1.0, high=0.75, medium=0.5, low=0.25); `downtime_hours_normalised`
+and `age_days_normalised` are the ticket's downtime and age divided by the maximum seen
+in the current batch of tickets being ranked, capped at 1.0; `recurrence_count` is the
+raw match count below, divided by 5 and capped at 1.0. The weights themselves — severity > downtime > recurrence > age, in round numbers summing to 1.0 — are a hand-picked
+prioritisation ordering, not derived from any calibration process or historical outcome
+data (§9.2 explains why that data doesn't exist yet). Recurrence count is derived by
+matching open tickets against equipment-history-service records for the same `tool_id`
+and similar `code`/description (simple substring/keyword match, not ML) — the matching
+itself runs inside `recommendation-service` against history data the orchestrator
+already fetched and included in the `/priority-score` request body (see §3's note on
+`score_priority`); `recommendation-service` never queries equipment-history-service
+directly.
+
+**Deterministic vs. LLM boundary.** This scoring formula is deliberately deterministic,
+auditable, and cheap: ranking a fixed set of tickets by known fields doesn't benefit
+from an LLM, and benefits a lot from being reproducible. Root-cause *hypotheses*, by
+contrast, are generated by Claude, since synthesising unstructured evidence — alarm
+patterns, SOP text, shift notes — into a plausible explanation is exactly what a fixed
+formula can't do.
 
 ### 4.5 agent-orchestrator (port 8000)
 
@@ -178,7 +190,7 @@ The only service exposed to the user. Responsibilities:
 - Serves the static chat UI (`GET /`) and the dashboard (`GET /dashboard.html`).
 - `POST /chat` — conversational endpoint, runs the bounded plan→execute→synthesise flow
   (§6.1), returns the structured answer (§6.2). Accepts an optional `X-User-Role` header
-  (§9.3).
+  (§8).
 - `GET /audit/{request_id}` — replay the full tool-call trace for a prior request.
   `GET /audit?limit=` — summary rows for the most recent requests (dashboard list view).
 - `GET /dashboard/tickets`, `GET /dashboard/assets`, `GET /dashboard/priority` —
@@ -186,6 +198,11 @@ The only service exposed to the user. Responsibilities:
   `agent-orchestrator`; these proxy/reuse server-to-server calls to the other 4
   services so none of them need CORS configuration (they're never called by a
   client directly, only server-to-server — see §3's inter-service diagram).
+- `POST /tickets/{ticket_id}/followups` — same proxy pattern as the dashboard
+  endpoints above: the "Save follow-up" button (§6.4) calls this same-origin route
+  on `agent-orchestrator`, which then makes the real server-to-server call to
+  ticket-service's identically-shaped endpoint (§4.1). The browser never calls
+  ticket-service directly, for the same CORS reason as the dashboard data.
 - Holds the Claude client (planner model + synthesis model; automatically substituted
   with the offline `OfflineResponder` fallback when `ANTHROPIC_API_KEY` is unset — §6.6),
   tool schema (mapped 1:1 to the REST endpoints above), system prompts, grounding checks,
@@ -193,7 +210,10 @@ The only service exposed to the user. Responsibilities:
 
 ## 5. Data model / synthetic dataset
 
-Fab-flavored synthetic data, seeded via `scripts/seed_data.py` per service on startup:
+**Synthetic data**
+
+Synthetic data modeled on a semiconductor fab, stored as static JSON files under
+`data/seed/` and loaded by each service on startup:
 
 - **5 equipment assets**: ETCH-07, LITHO-03, CMP-02, DEP-05, CLEAN-11, spread across
   2 lines (Line-A, Line-B) and process areas (Etch, Litho, CMP, Deposition, Wet Clean).
@@ -205,6 +225,32 @@ Fab-flavored synthetic data, seeded via `scripts/seed_data.py` per service on st
 - **3 documents**: an etch-chamber troubleshooting guide, an RF-generator preventive
   maintenance SOP excerpt, and a shift handover note mentioning an observation relevant
   to one of the open tickets — so a query can plausibly need all three sources.
+
+**How seeding interacts with SQLite** 
+
+Each of ticket-service and equipment-history-service
+manages its own SQLite database file. The first time it starts up, it creates that file
+and checks whether its main table already has any rows in it. If the table is empty, it
+reads the matching JSON file from `data/seed/` and inserts every record from it as a new
+row — that's the actual seeding step. If the table already has rows, it skips this
+entirely and leaves the existing data untouched.
+
+That skip-if-not-empty check is what it relies on, and it only works because the seed
+files and the live database live in two genuinely separate places. Docker Compose gives
+each container read-only access to the `data/` folder holding the seed JSON, while the
+actual SQLite database file lives in its own separate storage area that Docker keeps
+around even after the container stops or gets rebuilt. So seeding really only ever
+happens once per database, at the moment it's created empty — after that, restarting
+the service never re-inserts or overwrites anything, even if the data has since changed,
+for example by saving a follow-up note through the UI. To reset back to the original
+synthetic dataset, you have to explicitly clear that stored data with
+`docker compose down -v`, which forces a fresh, empty database — and therefore a fresh
+seed — the next time you run `docker compose up`.
+
+The other two services don't follow this pattern. knowledge-service reads the same seed
+documents into an in-memory TF-IDF index at startup — no SQLite involved, since it has
+no mutable state to persist. recommendation-service consumes no seed data at all; it's
+a pure function with no storage of its own.
 
 ## 6. Agent workflow
 
@@ -219,9 +265,11 @@ answers changes. The rest of this section describes the live-mode behaviour; §6
 exactly how the fallback answers the same two call sites.
 
 1. **Plan** (cheap model, e.g. Haiku, or the offline fallback's keyword heuristics — §6.6
-   — if no key is set). System prompt + the same 7-tool schema (§4.5) + the user query,
-   called with `tool_choice: "any"` so the response is only tool_use blocks — no free
-   text, no execution yet. Claude may request multiple tool calls in this single
+   — if no key is set). This call sends Claude the system prompt, the list of available
+   tools (§4.5), and the user's query, with `tool_choice: "any"` so the response is one
+   or more tool calls, never free text — and nothing is executed yet, since Claude only
+   names its choice; the real call happens afterward, made by the orchestrator's own
+   code. Claude may request multiple tool calls in this single
    response (e.g. `get_tickets` and `get_equipment` together); the orchestrator treats
    the full set of returned tool_use blocks as "the plan."
 2. **Execute** (deterministic, no LLM either way). The orchestrator's router runs
@@ -255,7 +303,7 @@ cost-sensitive/regulated deployment context this was revised for (§9.1).
 
 ### 6.2 Response synthesis
 
-Final answer must validate against a fixed Pydantic schema:
+The final answer must validate against a fixed Pydantic schema (`AgentAnswer`):
 
 ```
 recommendation: str
@@ -263,49 +311,95 @@ evidence: list[{source: str, record_id: str, detail: str}]
 assumptions: list[str]
 confidence: "low" | "medium" | "high"
 next_action: str
+followup_note: {ticket_id: str, summary: str, root_cause: str, next_action: str} | None
 ```
 
-The synthesis call's raw output additionally carries `sufficient: bool` and an optional
-`additional_tool_request` (consumed by the orchestrator to decide whether to run the
-one allowed revision round; never exposed to the client — the `/chat` response only
-ever contains the `answer` shape above, plus `followup_note` per §6.4).
+`sufficient: bool` and `additional_tool_request` are not part of this schema — they're
+separate, top-level fields that wrap around it, and only in the first synthesis call's
+raw JSON:
+
+```json
+{
+  "answer": { ...AgentAnswer fields above... },
+  "sufficient": true | false,
+  "additional_tool_request": {"tool_name": string, "input": object} | null
+}
+```
+
+The orchestrator reads `sufficient`/`additional_tool_request` from this wrapper to
+decide whether to run the one allowed revision round (§6.1); they are never exposed to
+the client — the `/chat` response only ever contains the `answer` shape above.
+
+These two fields don't show up at all in the revision call, if it fires. That call's
+raw output is unwrapped `AgentAnswer` directly — no `"answer"` key, and no
+`sufficient`/`additional_tool_request` fields in its expected shape at all. That's also
+*why* a second revision is structurally impossible, not just a rule Claude is asked to
+follow: there's nowhere in the revision response's schema to even request one.
 
 If Claude's output doesn't validate against the expected schema at either synthesis
 step, the orchestrator falls back immediately to a templated answer built directly
 from the raw tool results already collected — there is deliberately no repair
-round-trip in this design (unlike an earlier version of this spec), because a repair
+round-trip in this design, because a repair
 call would reintroduce the unbounded-cost problem the bounded hybrid exists to remove.
 Claude's structured-output reliability is high enough that this is an acceptable
 trade: a malformed response is rare, and the fallback path already guarantees the user
 never sees a bare error.
 
-### 6.3 Evidence grounding (hallucination control)
+### 6.3 Evidence grounding (hallucination control) and prompt-injection scanning
 
-Every `record_id` in the final answer is checked against the set of IDs actually
-returned by tool calls during that session. Any unverifiable ID is flagged
-`"unverified"` in the response rather than presented as fact, and logged as a warning
-in the audit trail. This is a lightweight, mechanical check — not a substitute for
-prompt-level grounding instructions, but a backstop against them failing.
+**Evidence grounding (hallucination control)** 
 
-Tool results (especially knowledge-service snippets, which contain free-text shift
-notes) are treated as untrusted data: the system prompt explicitly instructs Claude to
-treat tool output as information, not instructions. Separately, the orchestrator scans
-every planned tool call's *input* (the arguments Claude requests a tool be called with,
-not the data that tool returns) for common prompt-injection phrasing (e.g. "ignore
-previous instructions") and logs a warning if found. This covers tool inputs only —
-tool *results* are not separately scanned; the mitigation for injected content reaching
-the synthesis model via a retrieved result is the system-prompt instruction above, not a
-scanner. Documented as a basic mitigation, not a comprehensive defence; result-side
-scanning is future work.
+Every tool call made during a request
+returns real records — tickets, history entries, documents, assets — each carrying an
+ID field (`ticket_id`, `record_id`, `tool_id`, `doc_id`, or `followup_id`). The
+orchestrator collects every one of these IDs into a single known-IDs set for that
+session. Before the final answer is returned, each `evidence[].record_id` Claude cites
+is checked against that set: if the ID genuinely appears in data fetched this session,
+it's marked `verified: true`; if Claude cites an ID that was never actually returned by
+any tool call — for instance, inventing a plausible-looking ticket number, or citing one
+it half-remembers from training data rather than from this session's real results — it's
+marked `verified: false` instead of being silently presented as fact. This is a
+mechanical, structural check, not a judgment call: it doesn't know whether a claim is
+*true*, only whether it's *traceable* to real data from this session. That's a
+deliberately narrow goal — it catches fabricated citations, not subtler reasoning
+errors — and it exists as a backstop for when prompt-level grounding instructions fail,
+not a replacement for them.
 
-### 6.4 Write actions are human-gated
+The outcome of this check isn't written to a separate log line; it's recorded as
+structured data on the answer itself — the `verified` flag on each evidence item — and
+that full answer, verified flags included, is what gets persisted to the audit trail
+(§7). There's no separate grounding-outcome record to check elsewhere.
 
-The agent can only *draft* a follow-up note (returned in the structured response). It
-never calls `POST /tickets/{id}/followups` itself. Persisting the note is a distinct,
-explicit action in the UI ("Save follow-up"), triggered by the user. This satisfies the
-spirit of the "human-in-the-loop approval before creating or updating records" stretch
-goal without adding an approval-workflow subsystem — the gate is structural, not
-procedural.
+**Prompt-injection scanning** 
+
+Tool results —
+especially knowledge-service snippets, which contain free-text shift notes — are
+treated as untrusted data: the system prompt explicitly instructs Claude to treat tool
+output as information, not instructions. Separately, before any planned tool call
+executes (in both the initial plan and the one optional revision round), the
+orchestrator scans that call's *input* — the arguments Claude requests a tool be called
+with, not the data the tool returns — for common prompt-injection phrasing (e.g.
+"ignore previous instructions"). Any match is recorded and surfaces to the caller as an
+assumption on the final answer, the same way evidence verification surfaces through the
+answer rather than a separate log. This covers tool *inputs* only — tool *results* are
+not separately scanned; the only mitigation for injected content reaching the synthesis
+model via a retrieved result is the system-prompt instruction above, not a scanner.
+This is a basic mitigation, not a comprehensive defence — result-side scanning remains
+documented future work, not yet built.
+
+### 6.4 Write actions are human-triggered by design
+
+The agent is deliberately restricted to *drafting* a follow-up note — it never calls
+`POST /tickets/{id}/followups` itself, and has no code path that could. Persisting a
+note requires a distinct, explicit action in the UI ("Save follow-up"): nothing is
+written to `ticket-service` unless a human chooses to write it. This directly satisfies
+the "human-in-the-loop approval before creating or updating records" stretch goal, and
+does so with less complexity than a typical approval-workflow subsystem — queued
+writes, approve/reject states, an audit of who approved what — would require: rather
+than building a gate for the agent to pass through, the design simply never gives the
+agent the ability to write in the first place. The safety property holds by
+construction, not by policy, which means there's no approval step to misconfigure,
+bypass, or forget to check.
 
 ### 6.5 Failure handling
 
@@ -322,11 +416,15 @@ procedural.
   `assumptions` field records the gap explicitly (e.g. "equipment-history-service was
   unreachable; recommendation is based on ticket data only").
 - The orchestrator never lets a downstream failure become an unhandled 500 to the user.
-- `ToolExecutor.execute()` dispatches through a `_handlers` registry (one dict entry
-  per tool: name → bound method) rather than an if/elif chain — adding a future tool
-  #8 means one registry entry plus one `TOOL_DEFS` entry, not editing a growing
-  conditional. Not a scale-driven change (7 tools doesn't need it yet); done because
-  it was free to do while already touching the retry logic above.
+- **`ToolExecutor.execute()` dispatches through a `_handlers` registry — a
+  `{tool_name: function}` map — rather than a growing `if/elif` chain.** `TOOL_DEFS`
+  (§4.5) is the tool schema Claude sees; `_handlers` is a separate, internal lookup
+  mapping each tool name to the Python method that actually runs it. This keeps
+  `execute()` itself closed to modification: adding a future tool #8 means adding one
+  entry to `TOOL_DEFS` and one to `_handlers`, not editing a conditional that every
+  prior tool's branch already lives inside. Not adopted because 7 tools demands it — it
+  wouldn't — but because the retry-logic work above was already touching this class,
+  and the registry pattern cost nothing extra to apply while there.
 
 ### 6.6 LLM-unavailable fallback (brief §8 compliance)
 
@@ -339,8 +437,9 @@ that substitute.
 
 | Condition | LLM client used | Behaviour |
 |---|---|---|
-| `ANTHROPIC_API_KEY` is set | `anthropic.Anthropic(...)` (real Claude API) | Full-fledged: real Claude Haiku plan call, real Claude Sonnet synthesis, exactly as described in §6.1. |
+| `ANTHROPIC_API_KEY` is set and valid | `anthropic.Anthropic(...)` (real Claude API) | Full-fledged: real Claude Haiku plan call, real Claude Sonnet synthesis, exactly as described in §6.1. |
 | `ANTHROPIC_API_KEY` is unset/empty | `OfflineResponder` (`app/offline_responder.py`) | Automatic fallback, no flag required: keyword-heuristic tool planning, templated synthesis built from real tool results. Same plan→execute→synthesise flow, same `AgentAnswer` shape, same grounding/audit/injection-scanning. Every offline answer carries `confidence: "low"` and an explicit assumption disclosing it wasn't generated by live Claude. |
+| `ANTHROPIC_API_KEY` is set but invalid (revoked, malformed, wrong permissions) | `anthropic.Anthropic(...)` (real client is still constructed — the key is never validated up front) | **No fallback.** The first live call raises `anthropic.APIError`; `/chat` (`app/main.py`) catches it and returns `502` with `detail="LLM provider error: ..."` — a visible failure, not a silent degrade to offline mode. Presence of a key, not its validity, is what selects the client at startup (§6.6 below), so an invalid key looks identical to a valid one until the first real call is made. |
 
 **Approach chosen: direct Claude API call by default, with an offline fallback.** The
 orchestrator always tries to use the real Anthropic API; only when no `ANTHROPIC_API_KEY`
@@ -415,45 +514,65 @@ that format fails a test immediately instead of silently breaking offline mode.
 - A `request_id` (UUID) is generated per `/chat` call and passed as a header on every
   downstream REST call, so log lines across services can be correlated by grepping one
   ID — a lightweight stand-in for distributed tracing.
-- **Audit-log schema is self-healing, not just created-once.** `CREATE TABLE IF NOT
-  EXISTS` only creates `audit_log` on a brand-new database — it silently does nothing
-  to a table that already exists with an older schema. Because `audit_log`'s SQLite
-  file lives in a Docker named volume that survives image rebuilds, a schema change
-  (e.g. the `schema_validation_failures` column added alongside the structured-output
-  hardening in §6.2) would otherwise crash every `INSERT` against a pre-existing
-  volume with `sqlite3.OperationalError: table audit_log has no column named ...` —
-  which is exactly what happened once, caught via a live `/chat` call against a
-  volume created before that column existed. `app/audit.py`'s `connect()` now runs a
-  small migration after table creation: `PRAGMA table_info(audit_log)` to see what
-  columns actually exist, then `ALTER TABLE ADD COLUMN` for anything missing. Not a
-  general migration framework — just enough to make the one failure mode that
-  actually occurred here impossible to hit again, with a regression test that
-  reproduces the exact error against a simulated pre-existing DB.
+- **Audit-log schema is migrated on every startup, not just created once.** `CREATE TABLE IF NOT
+  EXISTS` only handles a brand-new database — it does nothing for a table that already
+  exists under an older schema. Because `audit_log`'s SQLite file lives in a Docker
+  named volume that survives image rebuilds, a schema change (e.g. the
+  `schema_validation_failures` column added alongside the structured-output hardening
+  in §6.2) would otherwise crash every `INSERT` against a pre-existing volume with
+  `sqlite3.OperationalError: table audit_log has no column named ...`. This surfaced
+  during development via a live `/chat` call against a volume created before that
+  column existed, and was fixed at the source rather than patched around it:
+  `app/audit.py`'s `connect()` now runs a small migration on every startup —
+  `PRAGMA table_info(audit_log)` to see what columns actually exist, then
+  `ALTER TABLE ADD COLUMN` for anything missing. This is deliberately not a general
+  migration framework; it's scoped precisely to make the failure mode that actually
+  occurred here impossible to hit again, and a regression test reproduces the original
+  error against a simulated pre-existing database to prove it.
 
 ## 8. Security / access-control assumption
 
-No authentication or authorization is implemented in this demo. Documented assumption:
-in production, the orchestrator would sit behind an API gateway performing OIDC-based
-authentication, and service-to-service calls would carry a short-lived JWT or use mTLS,
-with the orchestrator enforcing role checks (engineer vs. manager) before including
-certain fields (e.g. cost/downtime rollups) in a response. This is called out as future
-work rather than implemented, to keep the demo's scope aligned with "minimum functional
-scope, polished."
+**What was built: RBAC assumptions, not RBAC enforcement.** This is deliberately
+scoped as role-based access control *assumptions*, not a full RBAC implementation: a
+caller-asserted framing hint that changes how the final recommendation is worded, not
+real access control. `/chat` accepts an optional
+`X-User-Role: engineer|manager` header (`app/main.py`); anything absent or unrecognised
+silently normalises to `engineer`. The role is threaded through `run_agent_loop` into
+the synthesis and revision system prompts only (`app/loop.py`'s `_ROLE_FRAMING` /
+`_role_framed_system_prompt`), never into the planning call and never into which tools
+get called. A manager gets a synthesis prompt that asks the model to lead with
+downtime/cost/cross-tool trends rather than alarm codes and step-by-step procedure; an
+engineer gets the reverse — but every role fetches identical tool results, sees
+identical evidence, and gets an answer built from the identical audit-logged data.
+Nobody sees more or less data than anyone else; this is framing, not filtering.
 
-Not to be confused with §9.3's RBAC *assumptions* stretch goal, which is real but
-narrower: a caller-asserted `X-User-Role` header that changes response *wording* only.
-It does not filter fields, does not authenticate the caller, and is not a substitute
-for the real auth/authz described above.
+**The production security picture behind this is already fully specified, not left
+vague.** In production, the orchestrator would sit behind an API gateway performing
+OIDC-based authentication, service-to-service calls would carry a short-lived JWT or
+use mTLS, and the orchestrator would enforce role checks (engineer vs. manager) before
+including certain fields (e.g. cost/downtime rollups) in a response.
 
-Of the future work above, the most concrete near-term step is backing the
-`X-User-Role` header with real authentication: signed JWTs carrying a role claim,
-verified by `agent-orchestrator` middleware, so a role is cryptographically asserted
-rather than trusted from an unauthenticated header. This is a direct extension of the
-§9.3 stub — no user store or login UI needed for a demo-scale version, just token
-issuance/verification with a shared signing secret — unlike the OIDC-gateway/mTLS
-picture above, which is real production infrastructure this demo doesn't need yet.
-See `README.md`'s "What the candidate would improve with more time" for this framed
-alongside the codebase's other concretely-next-buildable item (dependency pinning).
+No authentication or authorization is implemented in this demo, however — there is no
+login, no session, no verification of who is actually calling `/chat`, and the
+`X-User-Role` header above is entirely caller-asserted and unenforced: anyone can claim
+`X-User-Role: manager`. This is called out as documented future work rather than
+built. Explicitly out of scope for the same reason: per-role data or tool restrictions, and a
+real login/session system. Building those would be the actual "RBAC enforcement" item
+already listed as deferred future work in §2 — the stub above deliberately stays
+within this narrower "assumptions" scope, without pretending to be real access
+control, and is not a substitute for the real auth/authz described above.
+
+**The path from here to real auth is already concrete, though, not just a
+placeholder.** The most immediate next step is backing the `X-User-Role` header with
+real authentication: signed JWTs carrying a role claim, verified by
+`agent-orchestrator` middleware, so a role is cryptographically asserted rather than
+trusted from an unauthenticated header. This is a direct extension of the
+RBAC-assumptions stub above — no user store or login UI needed for a demo-scale
+version, just token issuance/verification with a shared signing secret — unlike the
+OIDC-gateway/mTLS picture above, which is real production infrastructure this demo
+doesn't need yet. See `README.md`'s "What the candidate would improve with more time"
+for this framed alongside the codebase's other concretely-next-buildable item
+(dependency pinning).
 
 ## 9. Trade-offs & future production considerations
 
@@ -473,24 +592,34 @@ At Claude Sonnet 5 introductory pricing ($2/MTok input, $10/MTok output through 
 
 **Known limitation: wall-clock latency, not just $ cost.** The table above is about
 spend; a separate, real-world-observed problem is response time. Calling Claude is
-simply slow: a live `/chat` call was measured at **51.74s** for a typical multi-ticket
-prioritisation-plus-reasoning query — high enough to look broken rather than slow
-without a loading indicator (now added to the UI, `static/app.js`). The cause is
+simply slow: a live `/chat` call was measured at **~51s** for a typical multi-ticket
+prioritisation-plus-reasoning query. The cause is
 structural, not a bug to be tuned away: every Claude call in the bounded hybrid (§6.1)
 is sequential and blocking — the next can't start until the previous finishes
-generating — and the synthesis step produces a full structured JSON answer, whose
-generation time scales with how much text that is. A query that also triggers the one
-optional revision round pays for two full synthesis generations back to back.
-Critically, the live tool-use loop rejected above would not fix this: it makes *more*
-sequential calls (3-6, uncapped) than the bounded hybrid's ceiling of 3, so it is
-equally or more latency-bound, never less — the latency problem and the
-cost-predictability problem this section already argues for are the same problem,
-solved by the same shape. (One contributing factor has since been addressed:
-`max_tokens=1500` on the synthesis call was too low for a multi-ticket answer,
-causing `stop_reason="max_tokens"` truncation and a failed JSON parse on some queries
-— raised to 4096, with a regression test asserting the actual API call kwarg,
-`app/loop.py`.) See `README.md`'s `/chat` latency bullet under "Known limitations and
-assumptions" for this same finding stated as a limitation.
+generating, so the ~51s is really the sum of 2-3 separate calls, not one slow call.
+The plan call (Haiku) is comparatively fast, since it only has to name a tool; almost
+all of the time is spent in synthesis (Sonnet), because an LLM generates its response
+token by token — there's no way to skip ahead to the end — and the synthesis step has
+to produce a full structured JSON answer (recommendation, an evidence list, assumptions,
+confidence, next action, sometimes a follow-up note), so its generation time scales
+with how much of that text there is. Sonnet is also inherently slower per token than
+Haiku, which compounds this: the step doing the heavy reasoning is also the step
+running on the slower model, by design (§9.1's model tiering). A query that also
+triggers the one optional revision round pays for a second full synthesis generation
+back to back, roughly doubling the already-slowest part of the pipeline — which is
+consistent with worst-case queries landing in the 40-50s range. Critically, the live
+tool-use loop rejected above would not fix this: it makes *more* sequential calls (3-6,
+uncapped) than the bounded hybrid's ceiling of 3, so it is equally or more
+latency-bound, never less — the latency problem and the cost-predictability problem
+this section already argues for are the same problem, solved by the same shape. (One
+contributing factor has since been addressed: `max_tokens=1500` on the synthesis call
+was too low for a multi-ticket answer, causing `stop_reason="max_tokens"` truncation
+and a failed JSON parse on some queries — raised to 4096, with a regression test
+asserting the actual API call kwarg, `app/loop.py`. Before that, some slow calls
+were also *wasted* time: a truncated, unparseable response still cost the full
+generation time before falling back to a template.) See `README.md`'s `/chat` latency
+bullet under "Known limitations and assumptions" for this same finding stated as a
+limitation.
 
 For this demo's expected volume (a handful of engineers/managers, occasional queries)
 the $ cost above is immaterial — total spend across development and a recorded demo
@@ -539,76 +668,69 @@ on-prem) were not implemented, and remain documented future work: query routing 
 add a pre-agent classification step outside this plan's scope, and topology is an
 infrastructure decision independent of the application code.
 
-### 9.2 Why async request submission was not considered for this demo
+### 9.2 Deferred production-scale infrastructure
 
-Separate from event-driven *inter-service* calls (§3.1's table, rejected), a distinct
-pattern is decoupling the *user's request* from computation — returning a job ID
-immediately and having the client poll or receive a webhook once the answer is ready,
-instead of blocking on the HTTP connection through the full tool-use loop.
+Four items in this design follow the same shape: async request submission, semantic
+search for knowledge retrieval, a circuit breaker around downstream calls, and
+event-driven ticket ingestion. Each is a real, well-understood production pattern
+solving a genuine problem — but none of these issues exist at the current scale of 
+this demo and implementing solutions for them now would introduce unnecessary 
+complexity to address problems that have not yet arisen, resulting in 
+an overengineered design.
 
-This solves a specific, real problem: bursty, high-concurrency load against a
-rate-limited LLM API, where many simultaneous users would otherwise all block on open
-connections waiting on the same downstream (Anthropic) API, and queuing/backpressure
-is needed to smooth that load. That is a genuine production-scaling concern.
+**Async request submission** — returning a job ID immediately and having the client
+poll or receive a webhook once the answer is ready, instead of blocking on the HTTP
+connection — solves bursty, high-concurrency load against a rate-limited LLM API,
+where many simultaneous users would otherwise all block on open connections to the
+same downstream (Anthropic) API. (Separate from event-driven *inter-service* calls,
+§3.1's table, already rejected there for different reasons.) This demo's interaction
+model is conversational — the user expects an answer in the same exchange, not "check
+back later" — the expected concurrency is a handful of engineers/managers rather than
+hundreds of simultaneous requests, and two features work naturally under a synchronous
+model but would need real extra design under an async one: the "show me the evidence"
+follow-up (only meaningful immediately after an answer exists) and the
+human-in-the-loop "Save follow-up" action (reacts to a draft note still present in the
+response it's replying to). Revisit once real concurrent production load exists — not
+before.
 
-It is not a problem this demo has, for three concrete reasons: the assessment's
-interaction model is conversational (a chat UX where the user expects an answer in
-the same exchange, not "check back later"); the expected concurrency is a handful of
-engineers/managers rather than hundreds of simultaneous requests; and two features
-work naturally under a synchronous model but would need real extra design under an
-async one — the "show me the evidence" follow-up (only meaningful immediately after an
-answer exists) and the human-in-the-loop "Save follow-up" action (reacts to a draft
-note still present in the response it's replying to). Building queue/job
-infrastructure to solve a load problem the demo doesn't have would be exactly the kind
-of unnecessary infrastructure complexity the brief asks candidates to avoid (§8 of the
-assessment brief: "do not spend excessive time on... infrastructure complexity").
+**Vector database / semantic search for knowledge retrieval** fixes TF-IDF's real
+blind spot — no stemming or synonym matching, so a query for "troubleshoot" won't
+match "troubleshooting" — which gets worse as a document corpus grows large and
+varied. This demo's corpus is 3 documents (§5), where TF-IDF is an exact fit: keyword
+overlap reliably finds the relevant document at that size. Adopting semantic search
+now would mean four real costs for no benefit yet: an external embedding-API
+dependency that breaks this system's zero-setup, works-fully-offline property (§6.6);
+real vector-DB infrastructure unjustified at a 3-document corpus; reduced
+explainability, since a TF-IDF match traces to the exact shared words while an
+embedding match doesn't, cutting against this system's evidence-grounding theme
+(§6.3); and a real risk of regressing on exact technical-identifier matching (alarm
+codes like `RF-OVR-REFL`, tool IDs like `ETCH-07`) that TF-IDF matches precisely and
+embeddings can blur. Revisit once the corpus grows large enough that keyword overlap
+genuinely starts missing relevant documents — not before.
 
-Rejected for this demo; the correct lever to reach for once real concurrent production
-load exists, not before.
+**A circuit breaker around downstream service calls** protects against cascading
+failure: under real concurrent traffic, a flat retry policy means every caller keeps
+hammering an already-degraded service with retries, which can turn one degraded
+service into a full outage. This demo is 5 services on one Docker network handling a
+handful of sequential requests, not hundreds of concurrent callers — the flat
+retry-once policy already in place (§6.5) is proportionate to that reality, recovering
+from a single transient failure without the overhead of tracking failure rates and
+open/half-open/closed state for a cascading-failure risk that doesn't exist at this
+scale. Revisit once there's real traffic volume where a degraded service could
+actually get hammered by concurrent retries — not before.
 
-### 9.3 RBAC assumptions (engineer vs. manager) — stretch goal, scoped as assumptions
+**Event-driven or scheduled ticket ingestion** keeps the agent's ticket data in sync
+with a real, constantly-changing upstream ticketing/CMMS system, via a webhook
+pipeline or scheduled polling. This demo's `ticket-service` seeds once from a static
+JSON file at container startup (§5) — there is no external system to sync with, since
+tickets are seeded or created directly via the API. Building a queue/scheduler now
+would be genuinely new infrastructure solving a data-freshness problem that doesn't
+exist yet. Revisit once this is backed by a real, changing ticketing system — not
+before.
 
-There is no real authentication or authorization anywhere in this system — no login,
-no session, no verification of who is actually calling `/chat`. Read literally, the
-brief's stretch goal asks for "role-based access control **assumptions**," not a full
-RBAC implementation, so that's exactly what's built: a caller-asserted, unenforced
-framing hint, not access control.
+Two more items round out the future-work picture, but belong to a different category
+— not deferred to avoid over-engineering, but for two unrelated reasons:
 
-Mechanism: `/chat` accepts an optional `X-User-Role: engineer|manager` header
-(`app/main.py`). Anything absent or unrecognised silently normalises to `engineer` —
-an unknown role is not a failure case, since nothing is actually being authorized.
-The role is threaded through `run_agent_loop` into the synthesis and revision system
-prompts only (`app/loop.py`'s `_ROLE_FRAMING` / `_role_framed_system_prompt`), never
-into the planning call and never into which tools get called.
-
-What a role changes: **only the wording of the final recommendation.** A manager gets
-a synthesis prompt that asks the model to lead with downtime/cost/cross-tool trends
-rather than alarm codes and step-by-step procedure; an engineer gets the reverse. What
-a role does **not** change: every role fetches identical tool results, sees identical
-evidence, and gets an answer built from the identical audit-logged data. Nobody sees
-more or less data than anyone else — this is framing, not filtering.
-
-Explicitly out of scope: verifying the header is truthful (anyone can claim
-`X-User-Role: manager`), per-role data or tool restrictions, and a real login/session
-system. Building those would be the actual "RBAC enforcement" item already listed as
-deferred future work in §2 — this stub satisfies the brief's narrower "assumptions"
-wording without pretending to be real access control.
-
-- **Knowledge retrieval**: TF-IDF is adequate for 3 documents; a real deployment with
-  hundreds of SOPs would need a proper vector store and chunking strategy. This is a
-  trade-off, not a free upgrade. Semantic search would fix TF-IDF's actual blind spot —
-  no stemming or synonym matching, so a query for "troubleshoot" won't match
-  "troubleshooting" — but costs: (1) an external embedding-API dependency (Voyage/
-  OpenAI/Cohere/local model), which breaks the zero-setup, works-fully-offline property
-  the rest of this system deliberately preserves (§6.6); (2) real vector-DB
-  infrastructure (Pinecone/Weaviate/pgvector/etc.), unjustified at a 3-document corpus;
-  (3) reduced explainability — a TF-IDF match is traceable to the exact shared words
-  and their weights, an embedding-similarity match is not, which cuts against this
-  system's audit/evidence-grounding theme (§6.3); and (4) a real risk of regressing on
-  exact technical-identifier matching (alarm codes like `RF-OVR-REFL`, tool IDs like
-  `ETCH-07`), which TF-IDF matches precisely and embeddings can blur in favour of
-  general semantic closeness. Worth adopting once corpus size and paraphrase-tolerance
-  needs justify it — not before.
 - **Recommendation scoring engine**: `recommendation-service` currently ranks tickets
   with a hand-picked weighted formula (0.4×severity + 0.3×downtime + 0.2×recurrence +
   0.1×age; §4.4), including keyword/substring matching for recurrence detection
@@ -618,27 +740,17 @@ wording without pretending to be real access control.
   production version would swap this for a small, still-explainable ML model (e.g.
   gradient-boosted trees over the same feature set) — or add an LLM-assisted scoring
   step — trained on real historical outcomes: which tickets actually got escalated,
-  how fast, and what happened after. Unlike the other items in this list, this one is
-  genuinely blocked, not just unbuilt: there's no real historical outcome data to
+  how fast, and what happened after. Unlike the four items above, this one is
+  genuinely *blocked*, not just deferred: there's no real historical outcome data to
   train or evaluate against yet, only synthetic seed tickets, so building it now would
   mean training on data that doesn't reflect anything real. See `README.md`'s "What
   the candidate would improve with more time" for this framed alongside the two
   actually-buildable-now items.
 - **Audit storage**: SQLite is fine for a demo; production would want an append-only
-  store (e.g. a dedicated audit table in Postgres, or a log pipeline) with retention
-  policy.
-- **Resilience**: no circuit breaker; at this scale a simple retry is sufficient, but a
-  service with sustained failures should trip a breaker rather than retry indefinitely.
-- **Ticket ingestion**: `ticket-service` seeds once, from a static JSON file, at
-  container startup — there is no ongoing ingestion pipeline. A real deployment would
-  need either event-driven ingestion (a webhook endpoint + queue, updating as the
-  upstream CMMS/ticketing system changes) or a scheduled refresh (polling on an
-  interval). Deliberately not built for this demo: it's genuinely new infrastructure —
-  a queue/scheduler and a new service or module — solving a live-data-freshness problem
-  a static, seeded demo dataset doesn't have, which is exactly the kind of unnecessary
-  infrastructure complexity §8 of the assessment brief asks candidates to avoid (same
-  reasoning as §9.2's rejection of async request submission). The correct lever to
-  reach for once this is backed by a real, changing ticketing system, not before.
+  store (e.g. a dedicated audit table in Postgres, or a log pipeline) with a retention
+  policy. This is a straightforward scale upgrade rather than a build-vs-defer
+  judgment call — there's no real design question here, just more storage
+  infrastructure than a demo needs.
 
 ## 10. Repository structure
 
@@ -648,8 +760,7 @@ service-centre-agent/
   .env.example
   README.md
   docs/
-    architecture.md              (expanded version of this spec + diagrams, for submission)
-    superpowers/specs/           (this file)
+    superpowers/specs/           (this file — the design rationale and architecture doc)
   common/
     logging_middleware.py        (canonical source, see below — do not hand-edit copies)
   services/
@@ -667,7 +778,6 @@ service-centre-agent/
   data/
     seed/                        (synthetic JSON source data)
   scripts/
-    seed_data.py
     sync-common.py                (regenerates the 5 logging_middleware.py copies from common/;
                                     --check mode fails CI on drift)
   tests/
@@ -719,4 +829,4 @@ pipeline for this repo.
 | ≥10 tickets, ≥5 assets, ≥10 history records, ≥3 documents | §5 |
 | Observability | §7 |
 | Safety/reliability | §6.3, §6.5, §8 |
-| README + architecture doc | `README.md`, `docs/architecture.md` |
+| README + architecture doc | `README.md`, this design spec |

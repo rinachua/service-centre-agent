@@ -4,9 +4,8 @@ A conversational assistant for equipment engineers and service managers: priorit
 open tickets, investigate root causes, and generate structured follow-up notes,
 grounded in purpose-built backend services rather than free-form LLM guessing.
 
-See `docs/architecture.md` for the full design rationale and
-`docs/superpowers/specs/2026-07-11-service-centre-agent-design.md` for the original
-design spec.
+See `docs/superpowers/specs/2026-07-11-service-centre-agent-design.md` for the full
+design rationale, architecture, and trade-off analysis.
 
 ## Prerequisites
 
@@ -86,9 +85,9 @@ calls server-to-server so the other 4 services never need CORS configuration.
 Every request makes at most 3 Claude calls total: 1 plan + 1 synthesis, plus exactly
 1 more capped "revision" synthesis call, only if the first synthesis judges its own
 evidence insufficient. There is no open-ended tool-use loop and no repair round-trip —
-see `docs/architecture.md` and the design spec's §3.1/§9.1 for why this bounded
-"plan→execute→synthesise" shape was chosen over a live tool-use loop for a
-cost-sensitive, auditable deployment context.
+see the design spec's §3.1/§9.1 for why this bounded "plan→execute→synthesise" shape
+was chosen over a live tool-use loop for a cost-sensitive, auditable deployment
+context.
 
 ## Run a single service outside Docker (for development)
 
@@ -153,7 +152,6 @@ scale, not scoping decisions:
   "Save follow-up" click in the UI (or a direct call to
   `POST /tickets/{ticket_id}/followups`) — this is a deliberate human-in-the-loop
   gate, not an oversight.
-- Dependency versions in each `requirements.txt` are floors (`>=`), not exact pins.
 - `/health` on each service checks that its actual dependency is reachable (DB
   connection, loaded document set), not just that the process is alive — but there is
   still no separate liveness vs. readiness distinction (e.g. Kubernetes-style probes),

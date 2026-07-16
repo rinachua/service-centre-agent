@@ -6,3 +6,5 @@ __pycache__/
 data-local/
 .idea
 .venv
+.DS_Store
+.superpowers
