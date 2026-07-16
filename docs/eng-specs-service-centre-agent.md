@@ -49,9 +49,9 @@ Four example queries define the acceptance bar:
                                       │ POST /chat
                                       ▼
                          ┌──────────────────────────┐
-                         │   agent-orchestrator     │◄──── audit_log (SQLite)
-                         │   (FastAPI + bounded     │
-                         │   plan→execute→synth)    │
+                         │   agent-orchestrator     │◄──── audit_log, per request_id (SQLite)
+                         │   (FastAPI + bounded     │◄──── Claude API (Haiku+Sonnet) /
+                         │   plan→execute→synth)    │      OfflineResponder if no key (§6.6)
                          └──┬──────┬──────┬──────┬──┘
                 REST        │      │      │      │      REST
         ┌───────────────────┘      │      │      └───────────────────────────────┐
