@@ -1,6 +1,6 @@
 # Semiconductor Equipment Service Centre — Agentic AI Assistant
 
-Design spec. Written for the "Agentic AI Software Architect" interview assessment.
+Engineering spec. Written for the assessment.
 
 ## 1. Goal
 

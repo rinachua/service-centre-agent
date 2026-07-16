@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the semiconductor equipment service centre agentic assistant described in `docs/superpowers/specs/2026-07-11-service-centre-agent-design.md`: 5 FastAPI microservices (ticket, equipment-history, knowledge, recommendation, agent-orchestrator), a bounded plan→execute→synthesise agent flow, a minimal chat UI, Docker Compose wiring, and tests.
+**Goal:** Build the semiconductor equipment service centre agentic assistant described in `docs/superpowers/specs/eng-specs-service-centre-agent.md`: 5 FastAPI microservices (ticket, equipment-history, knowledge, recommendation, agent-orchestrator), a bounded plan→execute→synthesise agent flow, a minimal chat UI, Docker Compose wiring, and tests.
 
 **Architecture:** Four independent REST data/logic services behind a single agent-orchestrator, which is the only service Claude and the browser ever talk to. The orchestrator runs a bounded plan→execute→synthesise flow against the Anthropic API (one cheap-model planning call, one full-model synthesis call, at most one capped revision round), grounds every answer against IDs actually returned by tool calls, and persists an audit trail. Revised from an initial live tool-use loop design after weighing cost predictability and auditability for a cost-sensitive/regulated deployment context — see spec §3.1/§9.1 for the full rationale.
 
@@ -75,7 +75,7 @@ CLAUDE_PLANNER_MODEL=claude-haiku-4-5-20251001
 # Semiconductor Equipment Service Centre — Agentic Assistant
 
 Setup and run instructions are in this file once Task 14 completes. Until then,
-see `docs/superpowers/specs/2026-07-11-service-centre-agent-design.md` and
+see `docs/superpowers/specs/eng-specs-service-centre-agent.md` and
 `docs/superpowers/plans/2026-07-11-service-centre-agent-implementation.md`.
 ```
 
@@ -3668,7 +3668,7 @@ open tickets, investigate root causes, and generate structured follow-up notes,
 grounded in purpose-built backend services rather than free-form LLM guessing.
 
 See `docs/architecture.md` for the full design rationale and
-`docs/superpowers/specs/2026-07-11-service-centre-agent-design.md` for the original
+`docs/superpowers/specs/eng-specs-service-centre-agent.md` for the original
 design spec.
 
 ## Prerequisites
@@ -3784,7 +3784,7 @@ done
 
 This document is the submission-facing architecture write-up. It summarises and
 supersedes the working design spec at
-`docs/superpowers/specs/2026-07-11-service-centre-agent-design.md`, which contains
+`docs/superpowers/specs/eng-specs-service-centre-agent.md`, which contains
 the full alternatives analysis.
 
 ## System diagram
@@ -3895,7 +3895,7 @@ query routing and deployment topology remain documented future work, not built h
 
 - [ ] **Step 3: Verify the deliverables checklist against the assessment brief**
 
-Read through `docs/superpowers/specs/2026-07-11-service-centre-agent-design.md` §12
+Read through `docs/superpowers/specs/eng-specs-service-centre-agent.md` §12
 ("Deliverables mapping") and confirm each row now has a corresponding real file in
 the repository (not just a plan task). This is a manual read-through, not a script —
 there is nothing to run.
