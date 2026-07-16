@@ -1,6 +1,6 @@
 # Semiconductor Equipment Service Centre — Agentic AI Assistant
 
-Engineering spec. Written for the assessment.
+Engineering spec for Semiconductor Equipment Service Centre — Agentic AI Assistant. 
 
 ## 1. Goal
 
