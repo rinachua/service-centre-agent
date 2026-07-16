@@ -7,6 +7,7 @@ from app.db import connect, seed_if_empty
 from app.logging_middleware import RequestIDMiddleware, configure_logging
 from app.schemas import Asset, HistoryRecord
 
+
 def create_app(db_path: str, seed_path: Path) -> FastAPI:
     configure_logging("equipment-history-service")
     app = FastAPI(title="equipment-history-service")
