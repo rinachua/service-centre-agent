@@ -4,7 +4,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from app.grounding import extract_known_ids, scan_for_injection, verify_evidence
+from app.grounding import extract_known_ids, extract_known_ticket_ids, scan_for_injection, verify_evidence
 from app.schemas import AgentAnswer
 from app.tools import TOOL_DEFS, ServiceError
 
@@ -297,10 +297,16 @@ def _finalize(answer: AgentAnswer, trace: AgentTrace):
     # placeholder ("TBD") or a combined string ("TCK-001 / TCK-002") when it judged two
     # tickets shared one issue — neither is a real ticket_id, so "Save follow-up" would
     # 404 against ticket-service every time, with the UI unable to do anything about
-    # it. Apply the same grounding check evidence[].record_id already gets (this
-    # function, above) to followup_note.ticket_id too: discard an unverifiable
-    # followup_note rather than hand the UI something that can never be saved.
-    if answer.followup_note is not None and answer.followup_note.ticket_id not in known_ids:
+    # it. Apply a grounding check to followup_note.ticket_id too: discard an
+    # unverifiable followup_note rather than hand the UI something that can never be
+    # saved. Deliberately checked against known_ticket_ids (values seen specifically
+    # under a "ticket_id" key), not the broader `known_ids` pool evidence verification
+    # above uses — that pool also includes history record_ids, tool_ids, and doc_ids,
+    # so a history record like "HIST-012" would incorrectly pass a check against it
+    # whenever that session's tool calls happened to include equipment history, even
+    # though "HIST-012" was never a real ticket.
+    known_ticket_ids = extract_known_ticket_ids(trace.raw_tool_results)
+    if answer.followup_note is not None and answer.followup_note.ticket_id not in known_ticket_ids:
         discarded_id = answer.followup_note.ticket_id
         answer.followup_note = None
         answer.assumptions.append(

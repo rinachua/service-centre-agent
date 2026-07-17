@@ -137,8 +137,16 @@ def create_app(
             return request_with_retry(
                 "POST", f"{ticket_url}/tickets/{ticket_id}/followups", json_body=body.model_dump()
             )
+        except httpx.HTTPStatusError as exc:
+            # Pass through ticket-service's real status (e.g. 404 for an unknown
+            # ticket_id) instead of collapsing every downstream error into a generic
+            # 502 — a 404 here is a legitimate, actionable response from ticket-service
+            # doing its own validation, not an orchestrator-level failure.
+            raise HTTPException(
+                status_code=exc.response.status_code, detail=f"ticket-service: {exc.response.text}"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"ticket-service error: {exc}") from exc
+            raise HTTPException(status_code=502, detail=f"ticket-service unreachable: {exc}") from exc
 
     @app.get("/dashboard/followups")
     def dashboard_followups(limit: int = 20):

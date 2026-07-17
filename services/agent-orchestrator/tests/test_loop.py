@@ -402,3 +402,42 @@ def test_keeps_followup_note_with_ticket_id_actually_seen_in_tool_results():
 
     assert answer.followup_note is not None
     assert answer.followup_note.ticket_id == "TCK-001"
+
+
+def test_discards_followup_note_with_history_record_id_used_as_ticket_id():
+    """Regression test for a real bug caught live: the synthesiser wrote
+    followup_note.ticket_id = "HIST-012" — a real ID, but an equipment-history
+    record_id, not a ticket_id. The broad `known_ids` pool used for evidence
+    verification includes record_id/tool_id/doc_id alongside ticket_id, so a naive
+    "was this ID seen anywhere" check would wrongly treat HIST-012 as valid whenever
+    the session's tool calls happened to include equipment history — and
+    "Save follow-up" would then 404 against ticket-service, since HIST-012 isn't a row
+    in the tickets table. The check must be narrowed to IDs seen specifically under a
+    ticket_id key."""
+    plan = _plan_response(FakeToolUseBlock(name="get_equipment_history", input={"tool_id": "ETCH-07"}, id="tu_1"))
+    synthesis = _text_response({
+        "answer": {
+            "recommendation": "Draft a follow-up.",
+            "evidence": [],
+            "assumptions": [],
+            "confidence": "low",
+            "next_action": "Review.",
+            "followup_note": {
+                "ticket_id": "HIST-012",
+                "summary": "s", "root_cause": "r", "next_action": "n",
+            },
+        },
+        "sufficient": True,
+        "additional_tool_request": None,
+    })
+    client = FakeAnthropicClient([plan, synthesis])
+    executor = FakeToolExecutor(results={
+        "get_equipment_history": [{"record_id": "HIST-012", "tool_id": "ETCH-07"}],
+    })
+
+    answer, trace = run_agent_loop(
+        client, "claude-haiku-4-5-20251001", "claude-sonnet-5", "draft a follow-up note", executor
+    )
+
+    assert answer.followup_note is None
+    assert any("HIST-012" in a and "discarded" in a for a in answer.assumptions)

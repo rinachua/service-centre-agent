@@ -155,6 +155,24 @@ def test_save_followup_returns_502_when_ticket_service_unreachable(tmp_path):
     assert resp.status_code == 502
 
 
+@respx.mock
+def test_save_followup_passes_through_404_for_unknown_ticket_id(tmp_path):
+    """Regression test for a real bug caught live: a followup_note.ticket_id that
+    doesn't match a real ticket (e.g. a history record_id like HIST-012 mistaken for
+    a ticket_id) makes ticket-service itself return 404. That used to get collapsed
+    into a generic 502 by save_followup's blanket httpx.HTTPError handler, hiding a
+    legitimate, actionable 404 behind an opaque orchestrator-level failure code."""
+    respx.post("http://ticket-service:8001/tickets/HIST-012/followups").mock(
+        return_value=httpx.Response(404, json={"detail": "Ticket HIST-012 not found"})
+    )
+    test_client = _build_client(tmp_path, FakeAnthropicClient([]))
+    resp = test_client.post(
+        "/tickets/HIST-012/followups",
+        json={"summary": "s", "root_cause": "r", "next_action": "n"},
+    )
+    assert resp.status_code == 404
+
+
 def test_list_audit_returns_empty_list_when_nothing_logged_yet(tmp_path):
     test_client = _build_client(tmp_path, FakeAnthropicClient([]))
     resp = test_client.get("/audit")
