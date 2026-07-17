@@ -62,7 +62,7 @@ Four example queries define the acceptance bar:
 │ (SQLite)       │  │ service (SQLite)    │     │ (TF-IDF search)   │    │ service (rule-based) │
 └────────────────┘  └─────────────────────┘     └───────────────────┘    └──────────────────────┘
       tools:                tools:                     tools:                     tools:
-   get_tickets          get_equipment,            search_knowledge           score_priority*
+   get_tickets          get_equipment,            search_knowledge           score_priority
     get_ticket       get_equipment_history
                         search_history
 ```
